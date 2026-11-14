@@ -89,6 +89,7 @@ namespace MacroKit.Tests
                 TestRunnerReuse();
                 TestMigrationAndInitials();
                 TestJournal();
+                TestModifierTriggers();
             }
             finally
             {
@@ -876,6 +877,129 @@ namespace MacroKit.Tests
                 MacroRunner.JournalOn = false;
                 Journal.Sink = null;
             }
+        }
+
+        /// <summary>
+        /// Триггер на Shift/Alt, скилл на Alt. Палец и состояние системы
+        /// имитируются: отправка идёт в подмену (на любой ОС ничего не уходит
+        /// наружу), а «система» — массив, который обновляют и палец, и инъекции.
+        /// </summary>
+        static void TestModifierTriggers()
+        {
+            Head("Триггер с модификатором, скилл на Alt");
+
+            var sys = new bool[256];
+            var oldSink = InputSender.Sink;
+            var oldAsync = KeyState.AsyncDown;
+            var ev = new List<Ev>();
+            Stopwatch clock = null;
+
+            InputSender.Sink = (vk, down) =>
+            {
+                lock (ev) ev.Add(new Ev { Vk = vk, Down = down, Ms = clock == null ? 0 : clock.Elapsed.TotalMilliseconds });
+                sys[vk] = down;
+                // Как в Windows: общий Shift/Alt шлётся scan-кодом левого — меняются оба
+                if (vk == 0x10) sys[0xA0] = down;
+                if (vk == 0x12) sys[0xA4] = down;
+            };
+            KeyState.AsyncDown = vk =>
+            {
+                if (vk == 0x10) return sys[0x10] || sys[0xA0];
+                if (vk == 0x12) return sys[0x12] || sys[0xA4];
+                return sys[vk];
+            };
+
+            Func<MacroDef, List<Ev>> run = def =>
+            {
+                lock (ev) ev.Clear();
+                clock = Stopwatch.StartNew();
+                var r = new MacroRunner(def);
+                r.Trigger();
+                WaitIdle(new[] { r }, 3000);
+                Thread.Sleep(50);
+                r.Dispose();
+                lock (ev) return new List<Ev>(ev);
+            };
+
+            Func<int, bool, MacroDef> slide = (vk, alt) =>
+            {
+                var d = new MacroDef { Name = "слайд", Repeat = RepeatMode.Once };
+                d.Actions.Add(new MacroAction
+                {
+                    Kind = ActionKind.Slide, Vk = vk, SkillAlt = alt, Ms = 0, CastMs = 20,
+                    MoveVk = 0x57, RunMs = 300, Jump = true, JumpAfterMs = 10, FreeMods = true
+                });
+                return d;
+            };
+
+            try
+            {
+                // 1. Триггер Shift+1, скилл Alt+1: Shift отпущен на время слайда и возвращён
+                KeyState.ResetPhysical();
+                Array.Clear(sys, 0, sys.Length);
+                KeyState.OnPhysical(0xA0, true);
+                sys[0xA0] = true;
+                var e1 = run(slide(0x31, true));
+                string d1 = Describe(e1);
+                Check("Shift+1 → Alt+1: Shift отпущен, Alt-скилл, бег, Shift возвращён",
+                      d1 == "Shift↑ Alt↓ 1↓ 1↑ Alt↑ W↓ Пробел↓ Пробел↑ W↑ Shift↓",
+                      "Shift↑ Alt↓ 1↓ 1↑ Alt↑ W↓ Пробел↓ Пробел↑ W↑ Shift↓", d1);
+                double gap1 = GapBetween(e1, 0x31, true, 0x57, true);
+                Check("от скилла до W — как без модификатора (~20 мс)", gap1 > 15 && gap1 < 30, "~20 мс", gap1.ToString("F0") + " мс");
+
+                // 2. Триггер Alt+2, скилл Alt+2: Alt пальца отпущен перед бегом и возвращён
+                KeyState.ResetPhysical();
+                Array.Clear(sys, 0, sys.Length);
+                KeyState.OnPhysical(0xA4, true);
+                sys[0xA4] = true;
+                var e2 = run(slide(0x32, true));
+                string d2 = Describe(e2);
+                // Alt в конце не возвращается — см. MacroRunner.RestoreModifiers
+                Check("Alt+2 → Alt+2: бег и прыжок без Alt",
+                      d2 == "2↓ 2↑ Alt↑ W↓ Пробел↓ Пробел↑ W↑",
+                      "2↓ 2↑ Alt↑ W↓ Пробел↓ Пробел↑ W↑", d2);
+                double gap2 = GapBetween(e2, 0x32, true, 0x57, true);
+                Check("Alt держится после скилла ~20 мс, W сразу за ним", gap2 > 15 && gap2 < 30, "~20 мс", gap2.ToString("F0") + " мс");
+
+                // 3. Сочетание сравнивается по пальцу: Shift в системе отпущен
+                //    (его отпустил прошлый слайд), но палец держит — Shift+1 подходит
+                KeyState.ResetPhysical();
+                Array.Clear(sys, 0, sys.Length);
+                var cfg = new AppConfig();
+                var p = new Profile { Name = "т" };
+                cfg.Profiles.Add(p);
+                cfg.ActiveProfileId = p.Id;
+                var m = new MacroDef { Name = "Shift+1", TriggerVk = 0x31, Shift = true, Suppress = true };
+                m.Actions.Add(new MacroAction { Kind = ActionKind.KeyPress, Vk = 0x33, Ms = 0 });
+                p.Macros.Add(m);
+
+                using (var engine = new MacroEngine())
+                {
+                    engine.Apply(cfg);
+                    engine.Filter(0xA0, true, false);          // палец на Shift
+                    bool matched = engine.Filter(0x31, true, false);
+                    engine.Filter(0x31, false, false);
+                    Check("Shift+1 подходит по пальцу, хотя система считает Shift отпущенным", matched, "подошёл", matched ? "подошёл" : "нет — ушла голая 1");
+                    engine.Filter(0xA0, false, false);
+                }
+            }
+            finally
+            {
+                InputSender.Sink = oldSink;
+                KeyState.AsyncDown = oldAsync;
+                KeyState.ResetPhysical();
+            }
+        }
+
+        static double GapBetween(List<Ev> evs, int vkA, bool downA, int vkB, bool downB)
+        {
+            double a = -1, b = -1;
+            foreach (var e in evs)
+            {
+                if (a < 0 && e.Vk == vkA && e.Down == downA) a = e.Ms;
+                else if (a >= 0 && b < 0 && e.Vk == vkB && e.Down == downB) b = e.Ms;
+            }
+            return a < 0 || b < 0 ? -1 : b - a;
         }
 
         static string Last(List<string> lines)

@@ -59,6 +59,15 @@ namespace MacroKit
         // Слайд закончился, оставив клавишу движения зажатой под палец пользователя
         bool _moveLeftDown;
 
+        // Модификаторы пальца, которые слайд отпустил, чтобы бег и прыжок ушли
+        // в игру чистыми. В конце слайда они возвращаются, если палец их держит.
+        readonly List<int> _restoreMods = new List<int>();
+
+        // Сколько свой модификатор скилла держался ПОСЛЕ клавиши скилла (хвост
+        // ModLeadMs). Этот хвост засчитывается в паузу на каст, иначе слайд с
+        // Alt-скиллом бежал бы на 40 мс позже обычного.
+        int _skillTail;
+
         /// <summary>Есть ли в макросе слайд: такие играют строго по одному.</summary>
         public bool HasSlide { get; private set; }
 
@@ -344,6 +353,8 @@ namespace MacroKit
 
             if (own) KeyState.Own(a.MoveVk);
             _moveLeftDown = false;
+            _restoreMods.Clear();
+            _skillTail = 0;
             InputSender.TraceNote("[слайд" + (a.Mode == SlideMode.Air ? " в прыжке" : "") + (own ? ", W рукой" : "") + "]");
 
             try
@@ -353,6 +364,7 @@ namespace MacroKit
             finally
             {
                 if (own) ReturnMove(a);
+                RestoreModifiers();
             }
         }
 
@@ -397,9 +409,16 @@ namespace MacroKit
 
             if (!PressSkillTaps(a)) return false;
 
+            // Модификатор пальца (Alt+2 — триггер, скилл тоже на Alt) иначе
+            // приклеится к бегу и прыжку: в игру уйдут Alt+W и Alt+Пробел
+            int spent = ReleaseModsBeforeMove(a);
+
             // Пауза на каст: движение прервало бы его. При разбеге клавиша уже
-            // зажата — тогда пауза просто течёт на бегу.
-            if (a.CastMs > 0 && !_waiter.Wait(a.CastMs)) return false;
+            // зажата — тогда пауза просто течёт на бегу. Хвост модификатора после
+            // скилла уже прошёл — он засчитывается в паузу: от скилла до W столько
+            // же, сколько у слайда без модификатора.
+            int cast = Math.Max(0, a.CastMs - spent);
+            if (cast > 0 && !_waiter.Wait(cast)) return false;
 
             if (!preRunning) MoveDown(mv);
 
@@ -481,11 +500,69 @@ namespace MacroKit
             return ok;
         }
 
+        /// <summary>
+        /// Отпустить модификаторы, которые не нужны скиллу (Shift от триггера
+        /// Shift+1 и т. п.). Отпущенные запоминаются и в конце слайда
+        /// возвращаются, если палец их держит, — иначе система считала бы их
+        /// отпущенными до следующего нажатия.
+        /// </summary>
         void FreeModifiers(MacroAction a)
         {
-            if (!a.SkillCtrl && KeyState.AsyncDown(0x11)) InputSender.Key(0x11, false);
-            if (!a.SkillAlt && KeyState.AsyncDown(0x12)) InputSender.Key(0x12, false);
-            if (!a.SkillShift && KeyState.AsyncDown(0x10)) InputSender.Key(0x10, false);
+            if (!a.SkillCtrl) ReleaseMod(0x11);
+            if (!a.SkillAlt) ReleaseMod(0x12);
+            if (!a.SkillShift) ReleaseMod(0x10);
+        }
+
+        bool ReleaseMod(int vk)
+        {
+            if (!KeyState.AsyncDown(vk)) return false;
+            InputSender.Key(vk, false);
+            if (!_restoreMods.Contains(vk)) _restoreMods.Add(vk);
+            return true;
+        }
+
+        /// <summary>
+        /// После скилла: модификаторы, ещё зажатые в системе (палец держит Alt от
+        /// триггера Alt+2), отпустить до бега. Перед отпусканием — хвост
+        /// ModLeadMs, чтобы игра успела увидеть скилл вместе с модификатором.
+        /// Возвращает, сколько миллисекунд модификатор уже держался после скилла
+        /// (его хвост или свой хвост PressSkill), — это засчитывается в каст.
+        /// </summary>
+        int ReleaseModsBeforeMove(MacroAction a)
+        {
+            int spent = _skillTail;
+            if (!a.FreeMods) return spent;
+
+            bool any = KeyState.AsyncDown(0x11) || KeyState.AsyncDown(0x12) || KeyState.AsyncDown(0x10);
+            if (!any) return spent;
+
+            if (spent < ModLeadMs)
+            {
+                if (!_waiter.Wait(ModLeadMs - spent)) return ModLeadMs;
+                spent = ModLeadMs;
+            }
+
+            ReleaseMod(0x11);
+            ReleaseMod(0x12);
+            ReleaseMod(0x10);
+            return spent;
+        }
+
+        /// <summary>
+        /// Вернуть отпущенные модификаторы, которые палец всё ещё держит.
+        ///
+        /// Кроме Alt: возвращённый Alt, отпущенный пальцем без другой клавиши
+        /// между ними, Windows понимает как одиночное нажатие Alt и может
+        /// активировать меню окна — ввод в игру «залипает» до следующей клавиши.
+        /// Макросам возврат не нужен: сочетания сравниваются по пальцу, а Alt для
+        /// скилла слайд нажимает сам.
+        /// </summary>
+        void RestoreModifiers()
+        {
+            foreach (int vk in _restoreMods)
+                if (vk != 0x12 && KeyState.ModPhysicallyDown(vk) && !KeyState.AsyncDown(vk))
+                    InputSender.Key(vk, true);
+            _restoreMods.Clear();
         }
 
         bool TapJump(MacroAction a)
@@ -610,12 +687,16 @@ namespace MacroKit
 
             InputSender.Key(a.Vk, true);
             _keysDown.Add(a.Vk);
-            int hold = own ? Math.Max(a.Ms, ModLeadMs) : a.Ms;
-            if (hold > 0 && !_waiter.Wait(hold)) return false;
+            // Саму клавишу держим столько же, сколько без модификатора: игра
+            // принимает нажатие очередью сообщений (удержание 0 работает), а
+            // модификатор она смотрит, когда разбирает нажатие, — для этого и
+            // хвост ModLeadMs ниже.
+            if (a.Ms > 0 && !_waiter.Wait(a.Ms)) return false;
             InputSender.Key(a.Vk, false);
             _keysDown.Remove(a.Vk);
 
             if (own && !_waiter.Wait(ModLeadMs)) return false;
+            _skillTail = own ? ModLeadMs : 0;
 
             if (ownShift) { InputSender.Key(0x10, false); _keysDown.Remove(0x10); }
             if (ownAlt) { InputSender.Key(0x12, false); _keysDown.Remove(0x12); }
@@ -642,7 +723,19 @@ namespace MacroKit
 
             InputSender.Key(a.AutoVk, true);
             InputSender.Key(a.AutoVk, false);
-            return a.AutoGapMs <= 0 || _waiter.Wait(a.AutoGapMs);
+
+            // Свой модификатор скилла зажимается за ModLeadMs до клавиши — это
+            // время засчитывается в паузу «до скилла», чтобы от автоатаки до
+            // скилла было ровно AutoGapMs, как у скилла без модификатора
+            int gap = a.AutoGapMs - (NeedsOwnMod(a) ? ModLeadMs : 0);
+            return gap <= 0 || _waiter.Wait(gap);
+        }
+
+        static bool NeedsOwnMod(MacroAction a)
+        {
+            return (a.SkillCtrl && !KeyState.AsyncDown(0x11)) ||
+                   (a.SkillAlt && !KeyState.AsyncDown(0x12)) ||
+                   (a.SkillShift && !KeyState.AsyncDown(0x10));
         }
 
         void ReleaseAll()
@@ -1142,7 +1235,7 @@ namespace MacroKit
 
         // ---------- фильтр хука ----------
 
-        bool Filter(int vk, bool down, bool injected)
+        internal bool Filter(int vk, bool down, bool injected)
         {
             // Физическое состояние ведём сами: GetAsyncKeyState смешивает палец
             // пользователя с нашими инъекциями (см. KeyState)
@@ -1279,14 +1372,18 @@ namespace MacroKit
 
             if (!down) return ReleaseBindings(vk);
 
-            bool ctrl = _vCtrl || (Native.GetAsyncKeyState(0x11) & 0x8000) != 0;
-            bool alt = _vAlt || (Native.GetAsyncKeyState(0x12) & 0x8000) != 0;
-            bool shift = _vShift || (Native.GetAsyncKeyState(0x10) & 0x8000) != 0;
+            // Модификаторы — по пальцу, а не по состоянию системы. Слайд отпускает
+            // Shift триггера Shift+1, чтобы бег ушёл чистым; система после этого
+            // считает Shift отпущенным, и раньше следующее нажатие при всё ещё
+            // зажатом Shift не подходило под макрос — в игру уходила голая «1».
+            bool ctrl = _vCtrl || KeyState.ModPhysicallyDown(0x11);
+            bool alt = _vAlt || KeyState.ModPhysicallyDown(0x12);
+            bool shift = _vShift || KeyState.ModPhysicallyDown(0x10);
 
             // Боковые кнопки мыши читаются тем же способом, что и модификаторы
             // клавиатуры: мышиный хук ставить не нужно. VK_XBUTTON1 / VK_XBUTTON2.
-            bool m4 = (Native.GetAsyncKeyState(0x05) & 0x8000) != 0;
-            bool m5 = (Native.GetAsyncKeyState(0x06) & 0x8000) != 0;
+            bool m4 = KeyState.AsyncDown(0x05);
+            bool m5 = KeyState.AsyncDown(0x06);
 
             for (int i = 0; i < list.Length; i++)
             {
@@ -1355,8 +1452,8 @@ namespace MacroKit
         bool InLayer()
         {
             if (_layersDown > 0) return true;
-            if (_slideOnM4 && (Native.GetAsyncKeyState(0x05) & 0x8000) != 0) return true;
-            if (_slideOnM5 && (Native.GetAsyncKeyState(0x06) & 0x8000) != 0) return true;
+            if (_slideOnM4 && KeyState.AsyncDown(0x05)) return true;
+            if (_slideOnM5 && KeyState.AsyncDown(0x06)) return true;
             return false;
         }
 
@@ -1367,17 +1464,17 @@ namespace MacroKit
             {
                 case 0xA2: case 0xA3: case 0x11:
                     if (_vCtrl) return true;   // автоповтор уже проглоченного
-                    if ((Native.GetAsyncKeyState(0x11) & 0x8000) != 0) return false;
+                    if (KeyState.AsyncDown(0x11)) return false;
                     _vCtrl = true;
                     return true;
                 case 0xA4: case 0xA5: case 0x12:
                     if (_vAlt) return true;
-                    if ((Native.GetAsyncKeyState(0x12) & 0x8000) != 0) return false;
+                    if (KeyState.AsyncDown(0x12)) return false;
                     _vAlt = true;
                     return true;
                 case 0xA0: case 0xA1: case 0x10:
                     if (_vShift) return true;
-                    if ((Native.GetAsyncKeyState(0x10) & 0x8000) != 0) return false;
+                    if (KeyState.AsyncDown(0x10)) return false;
                     _vShift = true;
                     return true;
             }

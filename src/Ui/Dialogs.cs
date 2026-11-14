@@ -391,7 +391,7 @@ namespace MacroKit.Ui
 
             y += Block;
 
-            _chkFreeMods = new Check { Text = "Отпустить зажатые Ctrl / Alt / Shift перед началом" };
+            _chkFreeMods = new Check { Text = "Отпускать зажатые Ctrl / Alt / Shift на время слайда" };
             _chkFreeMods.Bounds = new Rectangle(24, y, _chkFreeMods.FitWidth(), 24);
             _chkFreeMods.CheckedChanged += (s, e) => { _a.FreeMods = _chkFreeMods.Checked; };
             Controls.Add(_chkFreeMods);

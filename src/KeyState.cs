@@ -35,6 +35,21 @@ namespace MacroKit
             return Volatile.Read(ref Physical[vk & 0xFF]);
         }
 
+        /// <summary>
+        /// Держит ли палец модификатор: общий код (0x10 Shift, 0x11 Ctrl, 0x12 Alt)
+        /// плюс левый и правый — хук сообщает именно их.
+        /// </summary>
+        public static bool ModPhysicallyDown(int generic)
+        {
+            switch (generic)
+            {
+                case 0x10: return IsPhysicallyDown(0x10) || IsPhysicallyDown(0xA0) || IsPhysicallyDown(0xA1);
+                case 0x11: return IsPhysicallyDown(0x11) || IsPhysicallyDown(0xA2) || IsPhysicallyDown(0xA3);
+                case 0x12: return IsPhysicallyDown(0x12) || IsPhysicallyDown(0xA4) || IsPhysicallyDown(0xA5);
+            }
+            return IsPhysicallyDown(generic);
+        }
+
         /// <summary>Вызывается из хука на каждое НЕинъецированное событие.</summary>
         public static void OnPhysical(int vk, bool down)
         {
