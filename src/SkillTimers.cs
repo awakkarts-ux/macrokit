@@ -42,10 +42,23 @@ namespace MacroKit
         /// <summary>Текущее время учёта, мс.</summary>
         public static long Now { get { return Clock.ElapsedMilliseconds; } }
 
-        /// <summary>Ключ учёта — название без регистра и лишних пробелов.</summary>
+        /// <summary>
+        /// Название без ранга: «Внезапный выстрел 4» и «Внезапный выстрел IV» —
+        /// одно и то же умение. Игра пишет ранг римскими цифрами, а набирают его
+        /// обычно арабскими — раньше из-за этого строка в логе не находилась.
+        /// </summary>
+        public static string BaseName(string name)
+        {
+            string n = Regex.Replace((name ?? "").Trim(), @"\s+", " ");
+            n = Regex.Replace(n, @"[\s:.]+$", "");
+            n = Regex.Replace(n, @"\s+([IVXLivxl]+|\d+)$", "");
+            return n;
+        }
+
+        /// <summary>Ключ учёта — название без ранга, регистра и лишних пробелов.</summary>
         public static string KeyOf(string name)
         {
-            return Regex.Replace((name ?? "").Trim(), @"\s+", " ").ToLowerInvariant();
+            return BaseName(name).ToLowerInvariant();
         }
 
         /// <summary>
@@ -55,7 +68,7 @@ namespace MacroKit
         /// </summary>
         public static Regex PatternFor(string name)
         {
-            string n = Regex.Escape(Regex.Replace((name ?? "").Trim(), @"\s+", " ")).Replace(@"\ ", @"\s+");
+            string n = Regex.Escape(BaseName(name)).Replace(@"\ ", @"\s+");
             return new Regex(@"^[\d.]+ [\d:]+ : (Критический удар! )?" + n + @"( [IVXL]+)?:",
                 RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
         }
@@ -82,6 +95,27 @@ namespace MacroKit
             long now = Now;
             for (int i = 0; i < w.Length; i++)
                 if (w[i].Rx.IsMatch(line)) Mark(w[i].Key, now);
+        }
+
+        /// <summary>Что с файлом лога — для окна серии: есть ли он и когда игра писала в него последний раз.</summary>
+        public static string LogStatus(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path)) return "путь не указан";
+                if (!System.IO.File.Exists(path))
+                    return "файла нет — проверь путь (папка игры) и что в игре включена запись чата в файл";
+                var age = DateTime.Now - System.IO.File.GetLastWriteTime(path);
+                string ago = age.TotalMinutes < 1 ? "меньше минуты назад"
+                           : age.TotalHours < 1 ? (int)age.TotalMinutes + " мин назад"
+                           : age.TotalDays < 1 ? (int)age.TotalHours + " ч назад"
+                           : (int)age.TotalDays + " дн назад";
+                return "файл найден, игра писала в него " + ago;
+            }
+            catch (Exception ex)
+            {
+                return "не читается: " + ex.Message;
+            }
         }
 
         public static void Mark(string key, long at)

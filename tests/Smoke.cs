@@ -1165,6 +1165,10 @@ namespace MacroKit.Tests
             Check("шаблон: упоминание в чате не считается", !m2, "не подходит", m2 ? "подходит" : "не подходит");
             bool m3 = SkillTimers.PatternFor("Выстрел").IsMatch("2026.11.14 07:06:12 : Прицельный выстрел IV: Тренировочная кукла получает 1 025 ед. урона.");
             Check("шаблон: другое умение не считается", !m3, "не подходит", m3 ? "подходит" : "не подходит");
+            bool m4 = SkillTimers.PatternFor("Внезапный выстрел 4").IsMatch("2026.11.14 07:06:10 : Внезапный выстрел IV: Тренировочная кукла получает 3 369 ед. урона.");
+            Check("название с рангом цифрой («… 4») находит «… IV»", m4, "подходит", m4 ? "подходит" : "не подходит");
+            bool m5 = SkillTimers.KeyOf("Внезапный выстрел IV") == SkillTimers.KeyOf("внезапный выстрел 4") && SkillTimers.KeyOf("Стрела грифона") == "стрела грифона";
+            Check("одно умение — один учёт кд, как ни пиши ранг", m5, "да", m5 ? "да" : "нет");
 
             ChatLog.JournalPath = System.IO.Path.Combine(dir, "timing.txt");
             ChatLog.Use(path);
@@ -1196,7 +1200,8 @@ namespace MacroKit.Tests
                 Check("продолжение не чаще своего кд", blast <= 2, "≤ 2", blast.ToString());
                 r.Dispose();
 
-                // 2. Стан: нажатие есть, строки нет — кд не засчитан, серия ждёт то же умение
+                // 2. Стан: нажатия есть, строк нет — кд не засчитан, и после стана
+                // все умения проходят: ни одно не «потерялось» в кд
                 SkillTimers.Clear();
                 ResetLog();
                 game = new FakeGame(path, cds, 400);
@@ -1204,12 +1209,14 @@ namespace MacroKit.Tests
                 r = new MacroRunner(def);
                 var t = new Thread(() => { Thread.Sleep(700); game.Stunned = false; });
                 t.Start();
-                Tap(r, 1000);
+                Tap(r, 1500);
                 t.Join();
                 game.Stop();
                 casts = game.CastsText();
                 Console.WriteLine("    после стана: " + casts);
-                Check("после стана первым идёт тот же Внезапный", casts.StartsWith("Внезапный выстрел"), "Внезапный выстрел …", casts);
+                Check("после стана прошли все три основных умения",
+                    casts.Contains("Внезапный выстрел") && casts.Contains("Точный выстрел") && casts.Contains("Стрела грифона"),
+                    "Внезапный, Точный, Грифон", casts);
                 r.Dispose();
 
                 // 3. «Цель находится слишком далеко» — ответ сразу, без ожидания 300 мс
@@ -1239,6 +1246,21 @@ namespace MacroKit.Tests
                 game.Stop();
                 casts = game.CastsText();
                 Check("Точный, прожатый рукой, серия пропускает", !casts.Contains("Точный выстрел"), "без Точного", casts);
+                r.Dispose();
+
+                // 4б. Строка не находится вовсе (не тот лог) — серия не застревает на первом умении
+                SkillTimers.Clear();
+                ResetLog();
+                var lost = SeriesMacro(true);
+                lost.Actions[0].Series[0].Name = "Нет такого умения";
+                lost.Actions[0].Series[0].WaitMs = 100;
+                game = new FakeGame(path, cds, 400);
+                r = new MacroRunner(lost);
+                Tap(r, 700);
+                game.Stop();
+                casts = game.CastsText();
+                Console.WriteLine("    первое умение не находится в логе: " + casts);
+                Check("дальше первого умения серия всё равно идёт", casts.Contains("Точный выстрел") && casts.Contains("Стрела грифона"), "Точный, Грифон", casts);
                 r.Dispose();
 
                 // 5. Всё в кд — ничего не жмём

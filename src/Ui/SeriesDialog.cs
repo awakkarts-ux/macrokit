@@ -22,8 +22,10 @@ namespace MacroKit.Ui
         const int XCd = XMod + WMod + 8, WCd = 84;
         const int XWait = XCd + WCd + 8, WWait = 96;
         const int XChain = XWait + WWait + 16;
-        const int DialogW = 920;
+        const int DialogW = 1040;
         const int XDel = DialogW - 24 - Theme.ControlHeight;
+        const int XDown = XDel - 8 - Theme.ControlHeight;
+        const int XUp = XDown - 8 - Theme.ControlHeight;
 
         static readonly string[] Mods = { "—", "Alt", "Shift", "Ctrl" };
 
@@ -59,15 +61,17 @@ namespace MacroKit.Ui
             int y = 24;
 
             AddHint("Каждое нажатие — следующее по кругу умение, которое не в кд. Умения в кд пропускаются.\n" +
-                    "Кд засчитывается по строке в Chat.log: в стане или вне дистанции умение не прошло — серия попробует его снова.",
-                24, y, DialogW - 48, 36);
-            y += 52;
+                    "Кд засчитывается, только когда в Chat.log появилась строка об умении: в стане или вне дистанции его нет — умение вернётся на следующем круге.\n" +
+                    "«Ждать строку» — сколько ждать эту строку после нажатия: мгновенным 1000, кастуемым — время каста с запасом.\n" +
+                    "«Продолжение» — умение, которое в игре появляется на той же клавише после умения строкой выше (Взрывной после Внезапного).",
+                24, y, DialogW - 48, 72);
+            y += 88;
 
             AddLabel("Название, как в Chat.log", XName, y);
             AddLabel("Клавиша", XKey, y);
             AddLabel("Модификатор", XMod, y);
             AddLabel("Кд, с", XCd, y);
-            AddLabel("Ждать, мс", XWait, y);
+            AddLabel("Ждать строку, мс", XWait, y);
             y += LabelGap;
 
             _rows.Location = new Point(0, y);
@@ -108,7 +112,7 @@ namespace MacroKit.Ui
 
             var hintLog = new Label
             {
-                Text = "без лога нажатие считается применением,\nа «Ждать» — просто пауза после умения",
+                Text = "без лога нажатие считается применением,\nа «Ждать строку» — просто пауза после умения",
                 Font = Theme.Small, ForeColor = Theme.TextFaint, TextAlign = ContentAlignment.TopLeft,
                 Bounds = new Rectangle(24, b + LabelGap + h + 4, 290, 34)
             };
@@ -121,6 +125,23 @@ namespace MacroKit.Ui
             _path.Bounds = new Rectangle(24, b + LabelGap, DialogW - 48, h);
             _path.Box.Text = _cfg.ChatLogPath ?? "";
             _bottom.Add(_path);
+
+            // Видно сразу, читает ли программа тот файл: не тот путь — серия
+            // не узнает, что умения прошли, и не будет засчитывать кд
+            var status = new Label
+            {
+                Font = Theme.Small, ForeColor = Theme.TextMuted, TextAlign = ContentAlignment.MiddleLeft,
+                Bounds = new Rectangle(24, b + LabelGap + h + 4, DialogW - 48, 20)
+            };
+            Action refresh = () =>
+            {
+                string st = SkillTimers.LogStatus(_path.Box.Text.Trim());
+                status.Text = st;
+                status.ForeColor = st.StartsWith("файл найден") ? Theme.TextMuted : Theme.Red;
+            };
+            refresh();
+            _path.Box.TextChanged += (o, e) => refresh();
+            _bottom.Add(status);
 
             foreach (var c in _bottom) { c.Tag = c.Top; Controls.Add(c); }
             _bottomTop = 0;
@@ -213,6 +234,14 @@ namespace MacroKit.Ui
             };
             _rows.Controls.Add(chain);
 
+            var up = new Btn { Text = Theme.IcoUp, Kind = Btn.Look.Tool, Font = Theme.IconSmall, Bounds = new Rectangle(XUp, y, h, h), Enabled = i > 0 };
+            up.Click += (o, e) => Move(i, -1);
+            _rows.Controls.Add(up);
+
+            var down = new Btn { Text = Theme.IcoDown, Kind = Btn.Look.Tool, Font = Theme.IconSmall, Bounds = new Rectangle(XDown, y, h, h), Enabled = i < _items.Count - 1 };
+            down.Click += (o, e) => Move(i, 1);
+            _rows.Controls.Add(down);
+
             var del = new Btn { Text = Theme.IcoDelete, Kind = Btn.Look.Tool, Font = Theme.IconSmall, Bounds = new Rectangle(XDel, y, h, h) };
             del.Click += (o, e) =>
             {
@@ -222,6 +251,18 @@ namespace MacroKit.Ui
                 BeginInvoke((Action)RebuildRows);   // не удалять кнопку из её же обработчика
             };
             _rows.Controls.Add(del);
+        }
+
+        /// <summary>Умение выше или ниже. Первое в списке не может быть продолжением.</summary>
+        void Move(int i, int dir)
+        {
+            int j = i + dir;
+            if (j < 0 || j >= _items.Count) return;
+            var t = _items[i];
+            _items[i] = _items[j];
+            _items[j] = t;
+            _items[0].Chain = false;
+            BeginInvoke((Action)RebuildRows);   // не пересоздавать кнопку из её же обработчика
         }
 
         void Relayout()
