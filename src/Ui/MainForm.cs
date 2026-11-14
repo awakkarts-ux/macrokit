@@ -1030,7 +1030,10 @@ namespace MacroKit.Ui
             var a = new MacroAction
             {
                 Kind = kind,
-                Ms = kind == ActionKind.Delay ? 100 : (kind == ActionKind.Slide ? 15 : 30)
+                // У слайда удержание скилла 0: проверено в бою — 15 мс дают заметно
+                // больше промахов, а пауза на каст отсчитывается от отпускания
+                // скилла, так что лишнее удержание ещё и сдвигает бег с прыжком
+                Ms = kind == ActionKind.Delay ? 100 : (kind == ActionKind.Slide ? 0 : 30)
             };
 
             if (!EditAction(a)) return;
