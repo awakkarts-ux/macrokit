@@ -16,6 +16,14 @@ namespace MacroKit.Ui
 
         readonly Timer _saveTimer = new Timer();
 
+        // Раз в 250 мс: активно ли окно игры, не переключили ли движок клавишей,
+        // жив ли хук (каждый восьмой тик)
+        readonly Timer _watchTimer = new Timer();
+        int _watchTicks;
+
+        RailButton _settingsBtn;
+        UpdateInfo _update;
+
         // --- левая панель профилей ---
         RoundPanel _rail;
         readonly List<RailButton> _profileButtons = new List<RailButton>();
@@ -95,6 +103,9 @@ namespace MacroKit.Ui
             _saveTimer.Interval = 600;
             _saveTimer.Tick += (s, e) => { _saveTimer.Stop(); SaveOnly(); };
 
+            _watchTimer.Interval = 250;
+            _watchTimer.Tick += (s, e) => OnWatch();
+
             Load += OnLoaded;
             FormClosing += OnClosing;
         }
@@ -151,6 +162,16 @@ namespace MacroKit.Ui
             _profileMenu.Items.Add(new ToolStripSeparator());
             _profileMenu.Items.Add("Удалить", null, (s, e) => DeleteProfile());
             foreach (ToolStripItem it in _profileMenu.Items) it.Padding = new Padding(4, 6, 12, 6);
+
+            // Настройки — внизу полосы, отдельно от профилей
+            _settingsBtn = new RailButton { IsIcon = true, Text = Theme.IcoSettings };
+            _settingsBtn.MouseUp += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left && _settingsBtn.ClientRectangle.Contains(e.Location)) OpenSettings();
+            };
+            _tips.SetToolTip(_settingsBtn, "Настройки и обновление");
+            _rail.Controls.Add(_settingsBtn);
+            _rail.Resize += (s, e) => _settingsBtn.Location = new Point(0, _rail.Height - RailButton.RowHeight - 12);
         }
 
         /// <summary>
@@ -616,6 +637,11 @@ namespace MacroKit.Ui
         {
             _cfg = ConfigStore.Load();
 
+            if (ConfigStore.LoadProblem != null)
+            {
+                MessageBox.Show(this, ConfigStore.LoadProblem, "MacroKit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+
             if (!_engine.Start())
             {
                 MessageBox.Show(this,
@@ -637,14 +663,98 @@ namespace MacroKit.Ui
             UpdateStatus();
 
             SaveOnly();   // фиксируем конфиг первого запуска, чтобы файл существовал сразу
+
+            _watchTimer.Start();
+            CheckUpdatesInBackground();
         }
 
         void OnClosing(object sender, FormClosingEventArgs e)
         {
+            _watchTimer.Stop();
             _saveTimer.Stop();
             SaveOnly();
             _engine.Changed -= OnEngineChanged;
             _engine.Dispose();
+            InputSender.ReleaseEverything();
+        }
+
+        // ================= сторож: окно игры, клавиша движка, хук =================
+
+        void OnWatch()
+        {
+            try
+            {
+                bool active = !_cfg.OnlyInGame ||
+                    ForegroundApp.Matches(ForegroundApp.CurrentFile(), _cfg.GameProcess);
+                _engine.SetGameActive(active);
+
+                // Движок переключили клавишей — подтягиваем переключатель и конфиг
+                if (_engineToggle.Checked != _engine.Enabled)
+                {
+                    _loading = true;
+                    _engineToggle.Checked = _engine.Enabled;
+                    _loading = false;
+                    _cfg.EngineEnabled = _engine.Enabled;
+                    UpdateStatus();
+                    SaveOnly();
+                }
+
+                if (++_watchTicks % 8 == 0 && _engine.CheckHook()) UpdateStatus();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(ex);
+            }
+        }
+
+        // ================= настройки и обновление =================
+
+        void OpenSettings()
+        {
+            using (var dlg = new SettingsDialog(_cfg, _engine, _update))
+            {
+                var result = dlg.ShowDialog(this);
+
+                if (dlg.FoundUpdate != null) SetUpdate(dlg.FoundUpdate);
+
+                if (result == DialogResult.OK)
+                {
+                    ApplyAndSave();
+                    UpdateStatus();
+                }
+
+                // Установщик уже запущен: закрываемся, он заменит файлы и
+                // запустит новую версию
+                if (dlg.QuitForUpdate) Close();
+            }
+        }
+
+        /// <summary>Тихая проверка при запуске: нашлась новая версия — точка на кнопке настроек.</summary>
+        void CheckUpdatesInBackground()
+        {
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                UpdateInfo info;
+                try { info = Updater.FetchLatest(); }
+                catch { return; }   // нет сети — не повод беспокоить
+
+                try
+                {
+                    if (IsDisposed || !IsHandleCreated) return;
+                    BeginInvoke((Action)(() => SetUpdate(info)));
+                }
+                catch { }
+            });
+        }
+
+        void SetUpdate(UpdateInfo info)
+        {
+            _update = info;
+            bool newer = Updater.IsNewer(info);
+            _settingsBtn.Badge = newer;
+            _tips.SetToolTip(_settingsBtn, newer
+                ? "Доступна версия " + Updater.Text(info.Version) + " — обновить в настройках"
+                : "Настройки и обновление");
         }
 
         void OnEngineChanged()
@@ -937,7 +1047,7 @@ namespace MacroKit.Ui
         {
             if (a.Kind == ActionKind.Slide)
             {
-                using (var dlg = new SlideDialog(a, _engine))
+                using (var dlg = new SlideDialog(a, _engine, _cfg.GameFps))
                     return dlg.ShowDialog(this) == DialogResult.OK;
             }
 
@@ -1362,8 +1472,24 @@ namespace MacroKit.Ui
 
             if (!_engine.Enabled)
             {
-                _statusLabel.Text = "Движок выключен";
+                _statusLabel.Text = _cfg.ToggleVk != 0
+                    ? "Движок выключен · " + KeyNames.Get(_cfg.ToggleVk)
+                    : "Движок выключен";
                 _statusLabel.ForeColor = Theme.TextFaint;
+                return;
+            }
+
+            if (!_engine.GameActive)
+            {
+                _statusLabel.Text = "Ждёт окно игры";
+                _statusLabel.ForeColor = Theme.TextMuted;
+                return;
+            }
+
+            if (_engine.ChatPaused)
+            {
+                _statusLabel.Text = "Пауза: чат (Enter)";
+                _statusLabel.ForeColor = Theme.Changed;
                 return;
             }
 
@@ -1379,6 +1505,9 @@ namespace MacroKit.Ui
 
             _statusLabel.Text = "Готов · активных " + active;
             _statusLabel.ForeColor = Theme.TextMuted;
+
+            if (_engine.HookRestarts > 0)
+                _tips.SetToolTip(_statusLabel, "Хук клавиатуры пропадал и был восстановлен: " + _engine.HookRestarts + " раз");
         }
     }
 

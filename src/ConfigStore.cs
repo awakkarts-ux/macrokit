@@ -19,60 +19,162 @@ namespace MacroKit
 
         public static readonly string FilePath = Path.Combine(Dir, "config.json");
 
+        /// <summary>Сюда складываются копии конфига перед перезаписью.</summary>
+        public static readonly string BackupDir = Path.Combine(Dir, "backups");
+
+        const int BackupsKept = 10;
+        static readonly TimeSpan BackupEvery = TimeSpan.FromMinutes(30);
+        static DateTime _lastBackup = DateTime.MinValue;
+
+        /// <summary>
+        /// Что случилось при последней загрузке, если что-то случилось: интерфейс
+        /// показывает это пользователю. null — всё прочиталось.
+        /// </summary>
+        public static string LoadProblem { get; private set; }
+
+        /// <summary>
+        /// Конфиг не прочитался, и сохранить его копию тоже не вышло. Пока так,
+        /// запись запрещена: иначе первое же сохранение затрёт единственный
+        /// экземпляр настроек пользователя набором по умолчанию.
+        /// </summary>
+        static bool _saveBlocked;
+
         // ---------- чтение ----------
 
         public static AppConfig Load()
         {
+            LoadProblem = null;
+            _saveBlocked = false;
+
+            if (!File.Exists(FilePath)) return Seed();
+
             try
             {
-                if (!File.Exists(FilePath)) return Seed();
-
                 string text = File.ReadAllText(FilePath, Encoding.UTF8);
-                if (string.IsNullOrWhiteSpace(text)) return Seed();
+                if (string.IsNullOrWhiteSpace(text))
+                    throw new InvalidDataException("файл пустой");
 
-                var root = new JavaScriptSerializer().DeserializeObject(text) as Dictionary<string, object>;
-                if (root == null) return Seed();
+                var root = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(text) as Dictionary<string, object>;
+                if (root == null)
+                    throw new InvalidDataException("в файле не объект JSON");
 
-                var cfg = new AppConfig();
-                cfg.EngineEnabled = B(root, "engineEnabled", true);
-                cfg.ChatLogPath = S(root, "chatLogPath", cfg.ChatLogPath);
-
-                object rawProfiles;
-                if (root.TryGetValue("profiles", out rawProfiles) && rawProfiles is object[])
-                {
-                    foreach (var item in (object[])rawProfiles)
-                    {
-                        var d = item as Dictionary<string, object>;
-                        if (d == null) continue;
-
-                        var p = new Profile();
-                        string pid = S(d, "id", null);
-                        if (!string.IsNullOrEmpty(pid)) p.Id = pid;
-                        p.Name = S(d, "name", "Профиль");
-                        ReadMacrosInto(d, p.Macros);
-                        cfg.Profiles.Add(p);
-                    }
-                    cfg.ActiveProfileId = S(root, "activeProfile", null);
-                }
-                else
-                {
-                    // Старый формат: макросы лежали в корне. Заворачиваем их в один
-                    // профиль, чтобы уже настроенное не потерялось при обновлении.
-                    var p = new Profile { Name = "Основной" };
-                    ReadMacrosInto(root, p.Macros);
-                    cfg.Profiles.Add(p);
-                    cfg.ActiveProfileId = p.Id;
-                }
-
-                if (cfg.Profiles.Count == 0) cfg.Profiles.Add(new Profile { Name = "Основной" });
-
+                var cfg = Parse(root);
+                Migrate(cfg);
                 return cfg;
+            }
+            catch (Exception ex)
+            {
+                // Битый конфиг не должен мешать запуску — но и пропасть не должен.
+                // Раньше здесь молча возвращался набор по умолчанию, и первое же
+                // сохранение затирало настройки. Теперь файл сначала откладывается.
+                string kept = KeepBroken();
+                LoadProblem = "Не удалось прочитать настройки: " + ex.Message + "\n\n" +
+                    (kept != null
+                        ? "Файл сохранён как\n" + kept + "\nПрограмма запущена с чистыми настройками."
+                        : "Отложить копию файла тоже не вышло, поэтому запись настроек выключена до перезапуска — " +
+                          "иначе он был бы затёрт. Файл: " + FilePath);
+                if (kept == null) _saveBlocked = true;
+                return Seed();
+            }
+        }
+
+        /// <summary>Копия нечитаемого конфига рядом с ним. null — не получилось.</summary>
+        static string KeepBroken()
+        {
+            try
+            {
+                string dest = Path.Combine(Dir, "config.broken-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + ".json");
+                File.Copy(FilePath, dest, true);
+                return dest;
             }
             catch
             {
-                // Битый конфиг не должен мешать запуску программы.
-                return Seed();
+                return null;
             }
+        }
+
+        static AppConfig Parse(Dictionary<string, object> root)
+        {
+            var cfg = new AppConfig();
+            cfg.EngineEnabled = B(root, "engineEnabled", true);
+            cfg.ChatLogPath = S(root, "chatLogPath", cfg.ChatLogPath);
+            cfg.OnlyInGame = B(root, "onlyInGame", false);
+            cfg.GameProcess = S(root, "gameProcess", cfg.GameProcess);
+            cfg.ChatPause = B(root, "chatPause", false);
+            cfg.ToggleVk = I(root, "toggleVk", cfg.ToggleVk);
+            cfg.GameFps = Math.Max(0, I(root, "gameFps", 0));
+            cfg.SlideJournal = B(root, "slideJournal", false);
+
+            object rawMigrations;
+            if (root.TryGetValue("migrations", out rawMigrations) && rawMigrations is object[])
+                foreach (var mg in (object[])rawMigrations)
+                    if (mg != null) cfg.Migrations.Add(Convert.ToString(mg, CultureInfo.InvariantCulture));
+
+            object rawProfiles;
+            if (root.TryGetValue("profiles", out rawProfiles) && rawProfiles is object[])
+            {
+                foreach (var item in (object[])rawProfiles)
+                {
+                    var d = item as Dictionary<string, object>;
+                    if (d == null) continue;
+
+                    var p = new Profile();
+                    string pid = S(d, "id", null);
+                    if (!string.IsNullOrEmpty(pid)) p.Id = pid;
+                    p.Name = S(d, "name", "Профиль");
+                    ReadMacrosInto(d, p.Macros);
+                    cfg.Profiles.Add(p);
+                }
+                cfg.ActiveProfileId = S(root, "activeProfile", null);
+            }
+            else
+            {
+                // Старый формат: макросы лежали в корне. Заворачиваем их в один
+                // профиль, чтобы уже настроенное не потерялось при обновлении.
+                var p = new Profile { Name = "Основной" };
+                ReadMacrosInto(root, p.Macros);
+                cfg.Profiles.Add(p);
+                cfg.ActiveProfileId = p.Id;
+            }
+
+            if (cfg.Profiles.Count == 0) cfg.Profiles.Add(new Profile { Name = "Основной" });
+
+            return cfg;
+        }
+
+        // ---------- одноразовые переделки ----------
+
+        public const string MigrationHeldMove = "held-move-profile";
+
+        /// <summary>
+        /// Слайды научились учитывать W, зажатую пальцем (MacroAction.RespectHeldMove).
+        /// Старые профили не трогаем — договорённость: правки макросов только в
+        /// новом профиле. Поэтому для каждого профиля со слайдами делается копия
+        /// «… · W рукой», где у слайдов новое поведение включено. Активным остаётся
+        /// прежний профиль: переключиться — решение пользователя.
+        /// </summary>
+        internal static void Migrate(AppConfig cfg)
+        {
+            if (cfg.Migrations.Contains(MigrationHeldMove)) return;
+
+            foreach (var p in cfg.Profiles.ToArray())
+            {
+                bool hasOldSlides = false;
+                foreach (var m in p.Macros)
+                    foreach (var a in m.Actions)
+                        if (a.IsSlide && !a.RespectHeldMove) hasOldSlides = true;
+                if (!hasOldSlides) continue;
+
+                var copy = p.Clone();
+                copy.Name = p.Name + " · W рукой";
+                foreach (var m in copy.Macros)
+                    foreach (var a in m.Actions)
+                        if (a.IsSlide) a.RespectHeldMove = true;
+
+                cfg.Profiles.Insert(cfg.Profiles.IndexOf(p) + 1, copy);
+            }
+
+            cfg.Migrations.Add(MigrationHeldMove);
         }
 
         /// <summary>Читает массив "macros" из узла в готовый список.</summary>
@@ -158,7 +260,10 @@ namespace MacroKit
                             AutoGapMs = Math.Max(0, I(ad, "autoGapMs", 20)),
                             LandMs = Math.Max(0, I(ad, "landMs", 350)),
                             SkillTaps = Math.Max(1, I(ad, "skillTaps", 1)),
-                            TapGapMs = Math.Max(0, I(ad, "tapGapMs", 40))
+                            TapGapMs = Math.Max(0, I(ad, "tapGapMs", 40)),
+                            JumpVk = I(ad, "jumpVk", 0x20),
+                            // нет поля — слайд из старого конфига, поведение прежнее
+                            RespectHeldMove = B(ad, "respectHeldMove", false)
                         });
                     }
                 }
@@ -171,6 +276,9 @@ namespace MacroKit
 
         public static void Save(AppConfig cfg)
         {
+            if (_saveBlocked)
+                throw new IOException("Запись выключена: прежний конфиг не прочитался и его копию сохранить не удалось.");
+
             Directory.CreateDirectory(Dir);
 
             var sb = new StringBuilder();
@@ -178,6 +286,17 @@ namespace MacroKit
             sb.Append("  \"engineEnabled\": ").Append(cfg.EngineEnabled ? "true" : "false").Append(",\n");
             sb.Append("  \"activeProfile\": ").Append(Q(cfg.Active.Id)).Append(",\n");
             sb.Append("  \"chatLogPath\": ").Append(Q(cfg.ChatLogPath)).Append(",\n");
+            sb.Append("  \"onlyInGame\": ").Append(cfg.OnlyInGame ? "true" : "false").Append(",\n");
+            sb.Append("  \"gameProcess\": ").Append(Q(cfg.GameProcess)).Append(",\n");
+            sb.Append("  \"chatPause\": ").Append(cfg.ChatPause ? "true" : "false").Append(",\n");
+            sb.Append("  \"toggleVk\": ").Append(cfg.ToggleVk).Append(",\n");
+            sb.Append("  \"gameFps\": ").Append(cfg.GameFps).Append(",\n");
+            sb.Append("  \"slideJournal\": ").Append(cfg.SlideJournal ? "true" : "false").Append(",\n");
+            {
+                var ms = new List<string>();
+                foreach (var mg in cfg.Migrations) ms.Add(Q(mg));
+                sb.Append("  \"migrations\": [").Append(string.Join(", ", ms.ToArray())).Append("],\n");
+            }
             sb.Append("  \"profiles\": [\n");
 
             for (int p = 0; p < cfg.Profiles.Count; p++)
@@ -213,12 +332,69 @@ namespace MacroKit
             sb.Append("  ]\n");
             sb.Append("}\n");
 
+            Backup();
+
             // Пишем через временный файл, чтобы падение на середине не убило конфиг.
             string tmp = FilePath + ".tmp";
             File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
 
-            if (File.Exists(FilePath)) File.Delete(FilePath);
-            File.Move(tmp, FilePath);
+            if (!File.Exists(FilePath))
+            {
+                File.Move(tmp, FilePath);
+                return;
+            }
+
+            // Replace подменяет файл одной операцией. Прежние Delete + Move
+            // оставляли окно, в котором конфига на диске не было вовсе.
+            try
+            {
+                File.Replace(tmp, FilePath, null);
+            }
+            catch (PlatformNotSupportedException)
+            {
+                File.Delete(FilePath);
+                File.Move(tmp, FilePath);
+            }
+        }
+
+        /// <summary>
+        /// Копия текущего конфига в backups — не чаще раза в полчаса и при первой
+        /// записи после запуска. Хранятся последние десять. Ошибки молчат:
+        /// бэкап не должен мешать самому сохранению.
+        /// </summary>
+        static void Backup()
+        {
+            try
+            {
+                if (!File.Exists(FilePath)) return;
+                if (DateTime.Now - _lastBackup < BackupEvery) return;
+
+                Directory.CreateDirectory(BackupDir);
+                string dest = Path.Combine(BackupDir, "config-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + ".json");
+                File.Copy(FilePath, dest, true);
+                _lastBackup = DateTime.Now;
+
+                var old = new DirectoryInfo(BackupDir).GetFiles("config-*.json");
+                Array.Sort(old, (a, b) => string.CompareOrdinal(b.Name, a.Name));   // новые первыми
+                for (int i = BackupsKept; i < old.Length; i++)
+                {
+                    try { old[i].Delete(); } catch { }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
+        /// Отпечаток макроса — его JSON. Движок по нему понимает, что макрос не
+        /// менялся, и оставляет ему прежний проигрыватель вместо пересоздания.
+        /// </summary>
+        public static string Fingerprint(MacroDef m)
+        {
+            var sb = new StringBuilder(512);
+            WriteMacro(sb, m);
+            return sb.ToString();
         }
 
         static void WriteMacro(StringBuilder sb, MacroDef m)
@@ -283,6 +459,8 @@ namespace MacroKit
                             sb.Append(", \"skillTaps\": ").Append(a.SkillTaps);
                             sb.Append(", \"tapGapMs\": ").Append(a.TapGapMs);
                         }
+                        if (a.JumpVk != 0x20) sb.Append(", \"jumpVk\": ").Append(a.JumpVk);
+                        sb.Append(", \"respectHeldMove\": ").Append(a.RespectHeldMove ? "true" : "false");
                         if (a.Mode == SlideMode.Air)
                         {
                             sb.Append(", \"apexMs\": ").Append(a.ApexMs);

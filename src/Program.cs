@@ -26,12 +26,17 @@ namespace MacroKit
                 Application.ThreadException += (s, e) => Report(e.Exception);
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Report(e.ExceptionObject as Exception);
 
+                // Что бы ни случилось, зажатое макросами не должно остаться зажатым:
+                // упавшая посреди слайда программа иначе оставляет W в системе.
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => InputSender.ReleaseEverything();
+
                 Application.Run(new Ui.MainForm());
             }
         }
 
         static void Report(Exception ex)
         {
+            InputSender.ReleaseEverything();
             if (ex == null) return;
 
             MessageBox.Show("Непредвиденная ошибка:\n\n" + ex.Message + "\n\n" + ex.StackTrace,

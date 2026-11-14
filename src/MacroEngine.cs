@@ -42,17 +42,29 @@ namespace MacroKit
         /// Макрос из конфига, из которого раскрыт этот. У макроса на ряд клавиш
         /// проигрыватель свой на каждую клавишу, а интерфейс знает только исходный.
         /// </summary>
-        public MacroDef Source { get; private set; }
+        public MacroDef Source { get; internal set; }
+
+        /// <summary>Отпечаток определения (ConfigStore.Fingerprint): по нему движок переиспользует проигрыватель.</summary>
+        public string Fingerprint { get; private set; }
+
+        /// <summary>Писать ленту событий каждого слайда в slides-timing.txt (AppConfig.SlideJournal).</summary>
+        public static volatile bool SlideJournal;
+
+        // Слайд закончился, оставив клавишу движения зажатой под палец пользователя
+        bool _moveLeftDown;
 
         /// <summary>Есть ли в макросе слайд: такие играют строго по одному.</summary>
         public bool HasSlide { get; private set; }
 
-        public MacroRunner(MacroDef def) : this(def, def) { }
+        public MacroRunner(MacroDef def) : this(def, def, null) { }
 
-        public MacroRunner(MacroDef def, MacroDef source)
+        public MacroRunner(MacroDef def, MacroDef source) : this(def, source, null) { }
+
+        public MacroRunner(MacroDef def, MacroDef source, string fingerprint)
         {
             _def = def;
             Source = source;
+            Fingerprint = fingerprint;
             HasSlide = def.Actions.Exists(x => x.Kind == ActionKind.Slide);
             _waiter = new PrecisionWaiter(_stop);
             _wake = new WaitHandle[] { _go, _shutdown };
@@ -262,11 +274,45 @@ namespace MacroKit
         /// в одном месте. Механика пауз и учёт зажатых клавиш те же, что у
         /// обычных действий, поэтому обрыв посреди слайда ничего не оставляет
         /// зажатым.
+        ///
+        /// С RespectHeldMove слайд на время проигрыша «владеет» клавишей движения
+        /// (KeyState.Own): события её с клавиатуры не доходят до игры, а в конце
+        /// она возвращается в то состояние, в котором её держит палец.
         /// </summary>
         bool PlaySlide(MacroAction a)
         {
-            if (a.Mode == SlideMode.Air) return PlayAirSlide(a);
+            bool own = a.RespectHeldMove && a.MoveVk > 0;
+            bool trace = SlideJournal;
 
+            if (own) KeyState.Own(a.MoveVk);
+            if (trace) InputSender.BeginTrace();
+            _moveLeftDown = false;
+
+            bool ok = false;
+            try
+            {
+                ok = a.Mode == SlideMode.Air ? PlayAirSlide(a, own) : PlayStandingSlide(a, own);
+                return ok;
+            }
+            finally
+            {
+                if (own) ReturnMove(a);
+                if (trace)
+                {
+                    string tape = InputSender.EndTrace();
+                    Journal.Append("slides-timing.txt", _def.Name + " [" + (a.Mode == SlideMode.Air ? "в прыжке" : "с места") +
+                        (own ? ", W рукой" : "") + "]" + (ok ? "" : " ПРЕРВАН") + ":  " + tape);
+                }
+            }
+        }
+
+        static int JumpKey(MacroAction a)
+        {
+            return a.JumpVk > 0 ? a.JumpVk : 0x20;
+        }
+
+        bool PlayStandingSlide(MacroAction a, bool own)
+        {
             // Физически зажатый модификатор-триггер (Shift+3 и подобное) иначе
             // приклеится ко всему, что мы шлём дальше: в игру уйдёт Shift+W.
             //
@@ -275,51 +321,37 @@ namespace MacroKit
             // физически её держит, и следующие сочетания с ней перестанут
             // подходить под макросы. Включать только если Shift+W или Alt+W
             // реально мешают движению в игре.
-            if (a.FreeMods)
-            {
-                if (!a.SkillCtrl && (Native.GetAsyncKeyState(0x11) & 0x8000) != 0) InputSender.Key(0x11, false);
-                if (!a.SkillAlt && (Native.GetAsyncKeyState(0x12) & 0x8000) != 0) InputSender.Key(0x12, false);
-                if (!a.SkillShift && (Native.GetAsyncKeyState(0x10) & 0x8000) != 0) InputSender.Key(0x10, false);
-            }
+            if (a.FreeMods) FreeModifiers(a);
+
+            int mv = a.MoveVk;
+            bool userHeld = own && KeyState.IsPhysicallyDown(mv);
 
             // Разбег до скилла. Прыжок отменяет анимацию только у бегущего
             // персонажа: с места он подпрыгивает стоя и отмены не выходит.
             bool preRunning = false;
             if (a.PreRunMs > 0)
             {
-                InputSender.Key(a.MoveVk, true);
-                _keysDown.Add(a.MoveVk);
+                MoveDown(mv);
                 preRunning = true;
-                if (!_waiter.Wait(a.PreRunMs))
-                {
-                    InputSender.Key(a.MoveVk, false);
-                    _keysDown.Remove(a.MoveVk);
-                    return false;
-                }
+                if (!_waiter.Wait(a.PreRunMs)) return false;
+            }
+            else if (userHeld)
+            {
+                // Пользователь бежит с зажатой W — слайд «с места» подобран под
+                // стоящего персонажа, поэтому сначала останавливаемся.
+                InputSender.Key(mv, false);
             }
 
             // Автоатака перед скиллом: в бою слайд с места срабатывает только так
-            if (!TapAuto(a))
-            {
-                if (preRunning) { InputSender.Key(a.MoveVk, false); _keysDown.Remove(a.MoveVk); }
-                return false;
-            }
+            if (!TapAuto(a)) return false;
 
             if (!PressSkillTaps(a)) return false;
 
             // Пауза на каст: движение прервало бы его. При разбеге клавиша уже
             // зажата — тогда пауза просто течёт на бегу.
-            if (a.CastMs > 0 && !_waiter.Wait(a.CastMs))
-            {
-                if (preRunning) { InputSender.Key(a.MoveVk, false); _keysDown.Remove(a.MoveVk); }
-                return false;
-            }
+            if (a.CastMs > 0 && !_waiter.Wait(a.CastMs)) return false;
 
-            if (!preRunning)
-            {
-                InputSender.Key(a.MoveVk, true);
-                _keysDown.Add(a.MoveVk);
-            }
+            if (!preRunning) MoveDown(mv);
 
             bool ok = true;
             if (a.Jump)
@@ -327,14 +359,7 @@ namespace MacroKit
                 int before = Math.Max(0, Math.Min(a.JumpAfterMs, a.RunMs));
                 if (before > 0) ok = _waiter.Wait(before);
 
-                if (ok)
-                {
-                    InputSender.Key(0x20, true);
-                    _keysDown.Add(0x20);
-                    ok = MacroAction.JumpHoldMs <= 0 || _waiter.Wait(MacroAction.JumpHoldMs);
-                    InputSender.Key(0x20, false);
-                    _keysDown.Remove(0x20);
-                }
+                if (ok) ok = TapJump(a);
 
                 if (ok)
                 {
@@ -348,9 +373,8 @@ namespace MacroKit
             }
 
             // Клавишу движения отпускаем всегда, даже если макрос прервали:
-            // иначе персонаж убежит.
-            InputSender.Key(a.MoveVk, false);
-            _keysDown.Remove(a.MoveVk);
+            // иначе персонаж убежит. Если её держит палец — оставляем.
+            FinishMove(a, own);
 
             return ok;
         }
@@ -362,35 +386,31 @@ namespace MacroKit
         ///   [W↓ разбег]  Пробел ↓↑  [W↑]  →  пик  →  автоатака  →  скилл  →  приземление  →  [бег]
         ///
         /// Движение в воздухе срывает выстрел, поэтому W отпускается сразу после
-        /// прыжка и возвращается только после приземления.
+        /// прыжка и возвращается только после приземления. Игра должна «увидеть
+        /// остановку» в воздухе — поэтому с RespectHeldMove отпускается и W,
+        /// которую держит палец: без этого джампшот на кайте не срабатывал.
         /// </summary>
-        bool PlayAirSlide(MacroAction a)
+        bool PlayAirSlide(MacroAction a, bool own)
         {
-            if (a.FreeMods)
-            {
-                if (!a.SkillCtrl && (Native.GetAsyncKeyState(0x11) & 0x8000) != 0) InputSender.Key(0x11, false);
-                if (!a.SkillAlt && (Native.GetAsyncKeyState(0x12) & 0x8000) != 0) InputSender.Key(0x12, false);
-                if (!a.SkillShift && (Native.GetAsyncKeyState(0x10) & 0x8000) != 0) InputSender.Key(0x10, false);
-            }
+            if (a.FreeMods) FreeModifiers(a);
 
-            // Разбег: прыжок получается в сторону движения, а не на месте
+            int mv = a.MoveVk;
+            bool userHeld = own && KeyState.IsPhysicallyDown(mv);
+
+            // Разбег: прыжок получается в сторону движения, а не на месте.
+            // Если пользователь уже бежит, разбег — это его бег.
             if (a.PreRunMs > 0)
             {
-                InputSender.Key(a.MoveVk, true);
-                _keysDown.Add(a.MoveVk);
+                if (!userHeld) MoveDown(mv);
                 if (!_waiter.Wait(a.PreRunMs)) return false;
             }
 
-            InputSender.Key(0x20, true);
-            _keysDown.Add(0x20);
-            bool ok = _waiter.Wait(MacroAction.JumpHoldMs);
-            InputSender.Key(0x20, false);
-            _keysDown.Remove(0x20);
+            bool ok = TapJump(a);
 
-            if (a.PreRunMs > 0)
+            if (a.PreRunMs > 0 || userHeld)
             {
-                InputSender.Key(a.MoveVk, false);
-                _keysDown.Remove(a.MoveVk);
+                InputSender.Key(mv, false);
+                _keysDown.Remove(mv);
             }
 
             if (!ok || (a.ApexMs > 0 && !_waiter.Wait(a.ApexMs))) return false;
@@ -403,14 +423,74 @@ namespace MacroKit
 
             if (a.RunMs > 0)
             {
-                InputSender.Key(a.MoveVk, true);
-                _keysDown.Add(a.MoveVk);
+                MoveDown(mv);
                 ok = _waiter.Wait(a.RunMs);
-                InputSender.Key(a.MoveVk, false);
-                _keysDown.Remove(a.MoveVk);
+                FinishMove(a, own);
             }
 
             return ok;
+        }
+
+        void FreeModifiers(MacroAction a)
+        {
+            if (!a.SkillCtrl && KeyState.AsyncDown(0x11)) InputSender.Key(0x11, false);
+            if (!a.SkillAlt && KeyState.AsyncDown(0x12)) InputSender.Key(0x12, false);
+            if (!a.SkillShift && KeyState.AsyncDown(0x10)) InputSender.Key(0x10, false);
+        }
+
+        bool TapJump(MacroAction a)
+        {
+            int jv = JumpKey(a);
+            InputSender.Key(jv, true);
+            _keysDown.Add(jv);
+            bool ok = MacroAction.JumpHoldMs <= 0 || _waiter.Wait(MacroAction.JumpHoldMs);
+            InputSender.Key(jv, false);
+            _keysDown.Remove(jv);
+            return ok;
+        }
+
+        void MoveDown(int vk)
+        {
+            InputSender.Key(vk, true);
+            _keysDown.Add(vk);
+        }
+
+        /// <summary>
+        /// Конец бега слайда. Если слайд владеет клавишей и палец её держит,
+        /// клавиша остаётся зажатой — персонаж бежит дальше без запинки.
+        /// </summary>
+        void FinishMove(MacroAction a, bool own)
+        {
+            int mv = a.MoveVk;
+            if (own && KeyState.IsPhysicallyDown(mv))
+            {
+                _keysDown.Remove(mv);   // теперь это клавиша пользователя, ReleaseAll её не тронет
+                _moveLeftDown = true;
+                return;
+            }
+
+            InputSender.Key(mv, false);
+            _keysDown.Remove(mv);
+        }
+
+        /// <summary>
+        /// Слайд отдаёт клавишу движения. Последний владелец приводит её в
+        /// соответствие с пальцем: держит — нажать, не держит — отпущена.
+        /// Срабатывает и при обрыве слайда.
+        /// </summary>
+        void ReturnMove(MacroAction a)
+        {
+            int mv = a.MoveVk;
+
+            if (_keysDown.Contains(mv))
+            {
+                InputSender.Key(mv, false);
+                _keysDown.Remove(mv);
+            }
+
+            bool free = KeyState.Disown(mv);
+            if (free && !_moveLeftDown && KeyState.IsPhysicallyDown(mv))
+                InputSender.Key(mv, true);
         }
 
         /// <summary>
@@ -423,9 +503,12 @@ namespace MacroKit
             var log = ChatLog.Current;
             if (log == null || string.IsNullOrEmpty(a.Pattern)) return false;
 
-            System.Text.RegularExpressions.Regex rx;
-            try { rx = new System.Text.RegularExpressions.Regex(a.Pattern, System.Text.RegularExpressions.RegexOptions.CultureInvariant); }
-            catch { return false; }
+            var rx = ChatLog.Compile(a.Pattern);
+            if (rx == null)
+            {
+                ChatLog.Journal(_def.Name + ": шаблон «" + a.Pattern + "» не разбирается, слайда не было");
+                return false;
+            }
 
             var sw = Stopwatch.StartNew();
             string hit = log.WaitFor(rx, Math.Max(1, a.Ms), _stop);
@@ -463,9 +546,9 @@ namespace MacroKit
         /// </summary>
         bool PressSkill(MacroAction a)
         {
-            bool ownCtrl = a.SkillCtrl && (Native.GetAsyncKeyState(0x11) & 0x8000) == 0;
-            bool ownAlt = a.SkillAlt && (Native.GetAsyncKeyState(0x12) & 0x8000) == 0;
-            bool ownShift = a.SkillShift && (Native.GetAsyncKeyState(0x10) & 0x8000) == 0;
+            bool ownCtrl = a.SkillCtrl && !KeyState.AsyncDown(0x11);
+            bool ownAlt = a.SkillAlt && !KeyState.AsyncDown(0x12);
+            bool ownShift = a.SkillShift && !KeyState.AsyncDown(0x10);
             bool own = ownCtrl || ownAlt || ownShift;
 
             if (ownCtrl) { InputSender.Key(0x11, true); _keysDown.Add(0x11); }
@@ -668,6 +751,23 @@ namespace MacroKit
         volatile bool _slideOnM4, _slideOnM5;
 
         volatile bool _enabled;
+
+        // ---- настройки из AppConfig, читает поток хука ----
+        volatile int _toggleVk;
+        volatile bool _chatPauseOn;
+
+        bool _toggleHeld;             // только поток хука: автоповтор клавиши-выключателя
+        volatile bool _chatPaused;    // Enter открыл чат — макросы молчат
+        volatile bool _gameActive = true;
+
+        // ---- сторож хука ----
+        int _probeSentAt;
+        bool _probePending;
+        int _lastProbe;
+
+        /// <summary>Сколько раз сторож переставлял пропавший хук.</summary>
+        public int HookRestarts { get; private set; }
+
         volatile Recorder _recorder;
         volatile Action _recordStop;
         volatile Action<int> _capture;
@@ -678,8 +778,34 @@ namespace MacroKit
         public event Action Changed;
 
         public bool HookOk { get { return _hook.IsRunning; } }
+
+        /// <summary>Текущие проигрыватели — для тестов.</summary>
+        internal MacroRunner[] Runners { get { lock (_gate) return _runners; } }
         public int HookError { get { return _hook.LastError; } }
         public bool IsRecording { get { return _recorder != null; } }
+
+        /// <summary>Макросы на паузе, потому что Enter открыл чат.</summary>
+        public bool ChatPaused { get { return _chatPauseOn && _chatPaused; } }
+
+        /// <summary>На переднем плане окно игры (или ограничение по окну выключено).</summary>
+        public bool GameActive { get { return _gameActive; } }
+
+        /// <summary>
+        /// Сообщить, активно ли окно игры. Вызывается интерфейсом по таймеру.
+        /// При уходе из игры всё играющее останавливается: слайд не должен
+        /// дожимать W в браузере.
+        /// </summary>
+        public void SetGameActive(bool active)
+        {
+            if (_gameActive == active) return;
+            _gameActive = active;
+            if (!active)
+            {
+                _chatPaused = false;
+                StopAll();
+            }
+            RaiseChanged();
+        }
 
         public bool Enabled
         {
@@ -708,6 +834,12 @@ namespace MacroKit
 
         // ---------- конфигурация ----------
 
+        /// <summary>
+        /// Пересобрать привязки под конфиг. Вызывается на каждую правку в окне,
+        /// поэтому проигрыватели не пересоздаются целиком: у макроса, который не
+        /// менялся (тот же отпечаток), остаётся прежний поток. Раньше любая галочка
+        /// пересоздавала десятки потоков и обрывала всё, что играло.
+        /// </summary>
         public void Apply(AppConfig cfg)
         {
             var newMap = new Binding[256][];
@@ -716,6 +848,32 @@ namespace MacroKit
             var buckets = new Dictionary<int, List<Binding>>();
             var isLayer = new bool[256];
             bool slideOnM4 = false, slideOnM5 = false;
+
+            MacroRunner[] old;
+            Binding[][] oldMap;
+            lock (_gate)
+            {
+                old = _runners;
+                oldMap = _map;
+            }
+
+            // Свободные старые проигрыватели по отпечаткам
+            var spare = new Dictionary<string, List<MacroRunner>>();
+            foreach (var r in old)
+            {
+                if (r.Fingerprint == null) continue;
+                List<MacroRunner> list;
+                if (!spare.TryGetValue(r.Fingerprint, out list)) { list = new List<MacroRunner>(); spare[r.Fingerprint] = list; }
+                list.Add(r);
+            }
+
+            // Какие проигрыватели сейчас «зажаты» — чтобы автоповтор после
+            // пересборки не принялся за перезапуск
+            var heldRunners = new HashSet<MacroRunner>();
+            foreach (var bucket in oldMap)
+                if (bucket != null)
+                    foreach (var b in bucket)
+                        if (b.Held) heldRunners.Add(b.Runner);
 
             foreach (var def in cfg.Macros)
             {
@@ -729,15 +887,27 @@ namespace MacroKit
 
                 // Макрос на ряд клавиш — проигрыватель на каждую: спам по двум
                 // кнопкам сразу должен идти параллельно, как у отдельных макросов.
-                var keys = def.AllKeys;
-                bool expand = keys.Count > 1 || def.Actions.Exists(a => a.Vk == MacroAction.TriggerKey);
-
-                foreach (int key in keys)
+                // Играет всегда копия: интерфейс правит определение на месте, и
+                // проигрыватель не должен видеть полуизменённый макрос.
+                foreach (int key in def.AllKeys)
                 {
-                    var play = expand ? def.ExpandFor(key) : def;
+                    var play = def.ExpandFor(key);
+                    string fp = ConfigStore.Fingerprint(play);
 
-                    var runner = new MacroRunner(play, def);
-                    runner.StateChanged += OnRunnerStateChanged;
+                    MacroRunner runner = null;
+                    List<MacroRunner> candidates;
+                    if (spare.TryGetValue(fp, out candidates) && candidates.Count > 0)
+                    {
+                        runner = candidates[candidates.Count - 1];
+                        candidates.RemoveAt(candidates.Count - 1);
+                        runner.Source = def;
+                    }
+                    else
+                    {
+                        runner = new MacroRunner(play, def, fp);
+                        runner.StateChanged += OnRunnerStateChanged;
+                    }
+
                     newRunners.Add(runner);
                     if (runner.HasSlide) slideRunners.Add(runner);
 
@@ -748,16 +918,14 @@ namespace MacroKit
                         list = new List<Binding>();
                         buckets[vk] = list;
                     }
-                    list.Add(new Binding { Def = play, Runner = runner });
+                    list.Add(new Binding { Def = runner.Def, Runner = runner, Held = heldRunners.Contains(runner) });
                 }
             }
 
             foreach (var kv in buckets) newMap[kv.Key] = kv.Value.ToArray();
 
-            MacroRunner[] old;
             lock (_gate)
             {
-                old = _runners;
                 _runners = newRunners.ToArray();
                 Volatile.Write(ref _slideRunners, slideRunners.ToArray());
                 Volatile.Write(ref _isLayer, isLayer);
@@ -766,8 +934,16 @@ namespace MacroKit
                 Volatile.Write(ref _map, newMap);
             }
 
+            // Всё, что не пригодилось, — в утиль; Dispose отпускает зажатое
+            foreach (var list in spare.Values)
+                foreach (var r in list)
+                {
+                    r.StateChanged -= OnRunnerStateChanged;
+                    r.Dispose();
+                }
             foreach (var r in old)
             {
+                if (r.Fingerprint != null) continue;
                 r.StateChanged -= OnRunnerStateChanged;
                 r.Dispose();
             }
@@ -778,8 +954,66 @@ namespace MacroKit
                 if (def.Enabled && def.Actions.Exists(a => a.Kind == ActionKind.WaitLog)) needLog = true;
             ChatLog.Use(needLog ? cfg.ChatLogPath : null);
 
+            _toggleVk = cfg.ToggleVk;
+            _chatPauseOn = cfg.ChatPause;
+            if (!cfg.ChatPause) _chatPaused = false;
+            MacroRunner.SlideJournal = cfg.SlideJournal;
+
             _enabled = cfg.EngineEnabled;
             RaiseChanged();
+        }
+
+        // ---------- сторож хука ----------
+
+        /// <summary>
+        /// Жив ли хук. Windows молча снимает низкоуровневый хук, если колбэк хоть
+        /// раз не уложился в LowLevelHooksTimeout (подвисание системы, загрузка
+        /// игры), — и макросы перестают работать до перезапуска программы.
+        ///
+        /// Вызывается интерфейсом раз в пару секунд. Если система видела ввод,
+        /// а хук давно молчит, шлём «зонд» — отпускание неназначенной клавиши
+        /// 0xE8 со своей подписью — и ждём, что хук его увидит. Не увидел за
+        /// секунду — хук переставляется. Возвращает true, если хук пришлось
+        /// переставить.
+        /// </summary>
+        public bool CheckHook()
+        {
+            if (!_started) return false;
+
+            int now = Environment.TickCount;
+            int lastHook = _hook.LastEventTick;
+
+            if (_probePending)
+            {
+                if (unchecked(lastHook - _probeSentAt) >= 0)
+                {
+                    _probePending = false;
+                    return false;
+                }
+                if (unchecked(now - _probeSentAt) < 1000) return false;
+
+                _probePending = false;
+                _hook.Stop();
+                KeyState.ResetPhysical();
+                _hook.Start();
+                HookRestarts++;
+                RaiseChanged();
+                return true;
+            }
+
+            // Хук недавно что-то видел — жив
+            if (unchecked(now - lastHook) < 3000) return false;
+
+            // Ввода в системе после последнего события хука не было — проверять нечего
+            int lastInput = Native.LastInputTick();
+            if (lastInput == 0 || unchecked(lastInput - lastHook) <= 0) return false;
+            if (unchecked(now - _lastProbe) < 15000) return false;
+
+            _lastProbe = now;
+            _probeSentAt = now;
+            _probePending = true;
+            InputSender.Key(0xE8, false);
+            return false;
         }
 
         public void StopAll()
@@ -854,6 +1088,10 @@ namespace MacroKit
 
         bool Filter(int vk, bool down, bool injected)
         {
+            // Физическое состояние ведём сами: GetAsyncKeyState смешивает палец
+            // пользователя с нашими инъекциями (см. KeyState)
+            if (!injected) KeyState.OnPhysical(vk, down);
+
             // Свои же события пропускаем — иначе макрос затриггерит сам себя.
             if (injected) return false;
 
@@ -884,9 +1122,32 @@ namespace MacroKit
                 return false;
             }
 
+            // Клавишей движения сейчас управляет слайд: события с клавиатуры, в том
+            // числе автоповтор, в игру не пускаем. Палец запомнен в KeyState, и
+            // слайд в конце вернёт клавишу в его состояние.
+            if (KeyState.IsOwned(vk)) return true;
+
             // Отпускание проглоченного модификатора глушим всегда, даже если движок
             // успели выключить: игра не видела нажатия, не должна видеть и отпускания.
             if (!down && SwallowedModUp(vk)) return true;
+
+            // Клавиша-выключатель движка работает и при выключенном движке
+            int toggle = _toggleVk;
+            if (toggle != 0 && vk == toggle)
+            {
+                if (down && !_toggleHeld)
+                {
+                    _toggleHeld = true;
+                    _enabled = !_enabled;
+                    if (!_enabled) StopAll();
+                    RaiseChanged();
+                }
+                else if (!down)
+                {
+                    _toggleHeld = false;
+                }
+                return true;
+            }
 
             if (!_enabled)
             {
@@ -897,7 +1158,39 @@ namespace MacroKit
                     Array.Clear(_layerHeld, 0, _layerHeld.Length);
                     _layersDown = 0;
                 }
+                if (!down) ReleaseBindings(vk);
                 return false;
+            }
+
+            // Окно игры не активно — ни слоёв, ни макросов
+            if (!_gameActive)
+            {
+                if (!down) ReleaseBindings(vk);
+                return false;
+            }
+
+            // Режим чата: Enter открывает и закрывает чат, Esc закрывает.
+            // Сами клавиши до игры доходят — мы только запоминаем состояние.
+            if (_chatPauseOn)
+            {
+                if (down && vk == 0x0D)
+                {
+                    _chatPaused = !_chatPaused;
+                    if (_chatPaused) StopAll();
+                    RaiseChanged();
+                    return false;
+                }
+                if (down && vk == 0x1B && _chatPaused)
+                {
+                    _chatPaused = false;
+                    RaiseChanged();
+                    return false;
+                }
+                if (_chatPaused)
+                {
+                    if (!down) ReleaseBindings(vk);
+                    return false;
+                }
             }
 
             // Клавиша-слой: в игру не уходит никогда, состояние помним сами
@@ -928,22 +1221,7 @@ namespace MacroKit
 
             bool suppress = false;
 
-            if (!down)
-            {
-                // На отпускании модификаторы не проверяем: пользователь мог отпустить
-                // Ctrl раньше самой клавиши, и тогда макрос завис бы в состоянии «зажат».
-                for (int i = 0; i < list.Length; i++)
-                {
-                    var b = list[i];
-                    if (b.Held)
-                    {
-                        b.Held = false;
-                        b.Runner.Release();
-                    }
-                    if (b.Def.Suppress) suppress = true;
-                }
-                return suppress;
-            }
+            if (!down) return ReleaseBindings(vk);
 
             bool ctrl = _vCtrl || (Native.GetAsyncKeyState(0x11) & 0x8000) != 0;
             bool alt = _vAlt || (Native.GetAsyncKeyState(0x12) & 0x8000) != 0;
@@ -987,6 +1265,33 @@ namespace MacroKit
                 if (d.Suppress) suppress = true;
             }
 
+            return suppress;
+        }
+
+        /// <summary>
+        /// Отпускание клавиши: снять пометку «зажата» со всех её привязок.
+        /// true — отпускание надо проглотить (триггер глушит исходную функцию).
+        ///
+        /// Модификаторы не проверяем: пользователь мог отпустить Ctrl раньше самой
+        /// клавиши, и тогда макрос завис бы в состоянии «зажат». Release зовём
+        /// всем, а не только помеченным Held: после пересборки привязок пометка
+        /// могла потеряться, и «пока держу» крутился бы вечно. Зовётся и на паузе
+        /// (чат, чужое окно, движок выключен) — иначе первое нажатие после паузы
+        /// сочлось бы автоповтором и пропало.
+        /// </summary>
+        bool ReleaseBindings(int vk)
+        {
+            var list = Volatile.Read(ref _map)[vk & 0xFF];
+            if (list == null) return false;
+
+            bool suppress = false;
+            for (int i = 0; i < list.Length; i++)
+            {
+                var b = list[i];
+                b.Held = false;
+                b.Runner.Release();
+                if (b.Def.Suppress) suppress = true;
+            }
             return suppress;
         }
 

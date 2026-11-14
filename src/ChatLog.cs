@@ -97,12 +97,43 @@ namespace MacroKit
         /// <summary>Строка в журнал задержек. Пишется в фоне, чтобы не тормозить макрос.</summary>
         public static void Journal(string line)
         {
-            string text = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + line + Environment.NewLine;
-            ThreadPool.QueueUserWorkItem(_ =>
+            MacroKit.Journal.Append(Path.GetFileName(JournalPath), line);
+        }
+
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> Patterns =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, Regex>();
+
+        /// <summary>
+        /// Шаблон строки лога, разобранный один раз на всю жизнь программы.
+        /// null — шаблон с ошибкой; Error расскажет, с какой.
+        /// </summary>
+        public static Regex Compile(string pattern)
+        {
+            if (string.IsNullOrEmpty(pattern)) return null;
+
+            Regex rx;
+            if (Patterns.TryGetValue(pattern, out rx)) return rx;
+
+            if (Error(pattern) != null) return null;
+
+            rx = new Regex(pattern, RegexOptions.CultureInvariant);
+            Patterns[pattern] = rx;
+            return rx;
+        }
+
+        /// <summary>Текст ошибки в шаблоне или null, если шаблон годный.</summary>
+        public static string Error(string pattern)
+        {
+            if (string.IsNullOrEmpty(pattern)) return "шаблон пустой";
+            try
             {
-                try { File.AppendAllText(JournalPath, text, Encoding.UTF8); }
-                catch { }
-            });
+                new Regex(pattern, RegexOptions.CultureInvariant);
+                return null;
+            }
+            catch (ArgumentException ex)
+            {
+                return ex.Message;
+            }
         }
 
         void Loop()

@@ -36,17 +36,27 @@ namespace MacroKit
         {
             if (cancel == null) throw new ArgumentNullException("cancel");
 
-            _timer = Native.CreateWaitableTimerEx(IntPtr.Zero, null,
-                Native.CREATE_WAITABLE_TIMER_MANUAL_RESET | Native.CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                Native.TIMER_ALL_ACCESS);
-
-            _highRes = _timer != IntPtr.Zero;
-
-            if (_timer == IntPtr.Zero)
+            try
             {
-                // Windows до 10 1803 — обычный таймер, точность хуже
                 _timer = Native.CreateWaitableTimerEx(IntPtr.Zero, null,
-                    Native.CREATE_WAITABLE_TIMER_MANUAL_RESET, Native.TIMER_ALL_ACCESS);
+                    Native.CREATE_WAITABLE_TIMER_MANUAL_RESET | Native.CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                    Native.TIMER_ALL_ACCESS);
+
+                _highRes = _timer != IntPtr.Zero;
+
+                if (_timer == IntPtr.Zero)
+                {
+                    // Windows до 10 1803 — обычный таймер, точность хуже
+                    _timer = Native.CreateWaitableTimerEx(IntPtr.Zero, null,
+                        Native.CREATE_WAITABLE_TIMER_MANUAL_RESET, Native.TIMER_ALL_ACCESS);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Нет kernel32 — тесты логики под Mono на Linux. Ждём событием отмены.
+                if (!(ex is DllNotFoundException) && !(ex is EntryPointNotFoundException)) throw;
+                _timer = IntPtr.Zero;
+                _highRes = false;
             }
 
             _handles = _timer != IntPtr.Zero
@@ -119,7 +129,7 @@ namespace MacroKit
         {
             lock (Gate)
             {
-                if (_refCount++ == 0) Native.timeBeginPeriod(1);
+                if (_refCount++ == 0) { try { Native.timeBeginPeriod(1); } catch (DllNotFoundException) { } }
             }
         }
 
@@ -127,7 +137,7 @@ namespace MacroKit
         {
             lock (Gate)
             {
-                if (_refCount > 0 && --_refCount == 0) Native.timeEndPeriod(1);
+                if (_refCount > 0 && --_refCount == 0) { try { Native.timeEndPeriod(1); } catch (DllNotFoundException) { } }
             }
         }
     }

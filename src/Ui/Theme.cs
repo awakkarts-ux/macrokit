@@ -88,6 +88,8 @@ namespace MacroKit.Ui
         public const string IcoCopy = "";
         public const string IcoRecord = "";
         public const string IcoImport = "";
+        public const string IcoSettings = "\uE713";
+        public const string IcoFolder = "\uE838";
 
         public static Color Hex(int rgb)
         {

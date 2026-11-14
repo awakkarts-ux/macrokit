@@ -99,8 +99,26 @@ namespace MacroKit
         /// и в игру уходит Shift+W вместо W.</summary>
         public bool FreeMods = true;
 
-        /// <summary>Удержание пробела в прыжке — величина некритичная, поэтому не в настройках.</summary>
+        /// <summary>Удержание клавиши прыжка — величина некритичная, поэтому не в настройках.</summary>
         public const int JumpHoldMs = 20;
+
+        /// <summary>Клавиша прыжка в игре. По умолчанию пробел.</summary>
+        public int JumpVk = 0x20;
+
+        /// <summary>
+        /// Учитывать клавишу движения, которую пользователь держит пальцем.
+        ///
+        /// Лучник кайтит с зажатой W. Без этой галочки слайд в прыжке не может
+        /// отпустить W в воздухе (она чужая), и выстрел срывается, а слайд с места
+        /// в конце отпускает W — и персонаж встаёт, хотя палец на клавише.
+        /// С галочкой слайд забирает W себе на время проигрыша: отпускает её где
+        /// нужно, глушит автоповтор с клавиатуры, а в конце возвращает в то
+        /// состояние, в котором её держит палец.
+        ///
+        /// Новые слайды создаются с ней. У слайдов из старых конфигов поле
+        /// отсутствует и читается как false — их поведение не меняется.
+        /// </summary>
+        public bool RespectHeldMove = true;
 
         public SlideMode Mode = SlideMode.Standing;
 
@@ -144,7 +162,8 @@ namespace MacroKit
                 CastMs = CastMs, MoveVk = MoveVk, RunMs = RunMs, PreRunMs = PreRunMs,
                 Jump = Jump, JumpAfterMs = JumpAfterMs, FreeMods = FreeMods,
                 Mode = Mode, AutoVk = AutoVk, ApexMs = ApexMs, AutoGapMs = AutoGapMs, LandMs = LandMs,
-                SkillTaps = SkillTaps, TapGapMs = TapGapMs
+                SkillTaps = SkillTaps, TapGapMs = TapGapMs,
+                JumpVk = JumpVk, RespectHeldMove = RespectHeldMove
             };
         }
 
@@ -444,9 +463,14 @@ namespace MacroKit
         {
             get
             {
-                var words = (Name ?? "").Split(new[] { ' ', '-', '_', '/' }, StringSplitOptions.RemoveEmptyEntries);
-                if (words.Length == 0) return "?";
-                if (words.Length == 1) return words[0].Substring(0, 1).ToUpperInvariant();
+                // Слова — только те, что начинаются с буквы или цифры: иначе в
+                // «Лучник · слайды» разделитель «·» становился второй буквой значка.
+                var words = new List<string>();
+                foreach (var w in (Name ?? "").Split(new[] { ' ', '-', '_', '/' }, StringSplitOptions.RemoveEmptyEntries))
+                    if (char.IsLetterOrDigit(w[0])) words.Add(w);
+
+                if (words.Count == 0) return "?";
+                if (words.Count == 1) return words[0].Substring(0, 1).ToUpperInvariant();
                 return (words[0].Substring(0, 1) + words[1].Substring(0, 1)).ToUpperInvariant();
             }
         }
@@ -483,6 +507,32 @@ namespace MacroKit
 
         /// <summary>Chat.log игры — для действия «Ждать строку в логе».</summary>
         public string ChatLogPath = @"C:\Games\Aion Empire\classic\Chat.log";
+
+        /// <summary>
+        /// Макросы работают, только пока на переднем плане окно этого процесса.
+        /// Иначе «4», набранная в Discord или браузере, уходит слайдом.
+        /// </summary>
+        public bool OnlyInGame;
+        public string GameProcess = "aion.bin";
+
+        /// <summary>
+        /// «Режим чата»: Enter ставит макросы на паузу до следующего Enter или Esc.
+        /// Эвристика — программа не видит, открыт ли чат в игре, — но она
+        /// закрывает почти все случаи «набрал сообщение — ушли скиллы».
+        /// </summary>
+        public bool ChatPause;
+
+        /// <summary>Клавиша, которая включает и выключает движок. 0 — нет. По умолчанию Pause.</summary>
+        public int ToggleVk = 0x13;
+
+        /// <summary>FPS игры — чтобы показывать тайминги ещё и в кадрах. 0 — не показывать.</summary>
+        public int GameFps;
+
+        /// <summary>Писать ленту событий каждого слайда в slides-timing.txt.</summary>
+        public bool SlideJournal;
+
+        /// <summary>Выполненные одноразовые переделки конфига (см. ConfigStore.Migrate).</summary>
+        public List<string> Migrations = new List<string>();
 
         /// <summary>
         /// Активный профиль. Никогда не возвращает null: пустой список профилей

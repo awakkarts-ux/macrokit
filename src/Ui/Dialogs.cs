@@ -226,9 +226,10 @@ namespace MacroKit.Ui
         readonly MacroAction _a;
         readonly MacroEngine _engine;
 
-        Btn _skillBtn, _moveBtn, _autoBtn, _autoClear;
+        Btn _skillBtn, _moveBtn, _autoBtn, _autoClear, _jumpKeyBtn;
         Combo _cbMode;
-        Check _chkCtrl, _chkAlt, _chkShift, _chkJump, _chkFreeMods, _chkFromTrigger;
+        Check _chkCtrl, _chkAlt, _chkShift, _chkJump, _chkFreeMods, _chkFromTrigger, _chkHeldMove;
+        readonly int _fps;
         NumField _numHold, _numCast, _numRun, _numPreRun, _numJumpAfter, _numAutoGap, _numApex, _numLand, _numTaps, _numTapGap;
         SectionLabel _lblRun, _lblPreRun;
         Label _lblTotal, _hintPreRun;
@@ -239,11 +240,12 @@ namespace MacroKit.Ui
 
         bool _loading;
 
-        public SlideDialog(MacroAction action, MacroEngine engine)
-            : base("Слайд", 640, 708)
+        public SlideDialog(MacroAction action, MacroEngine engine, int fps = 0)
+            : base("Слайд", 640, 800)
         {
             _a = action;
             _engine = engine;
+            _fps = fps;
 
             Build();
             LoadValues();
@@ -400,6 +402,22 @@ namespace MacroKit.Ui
 
             y += Block;
 
+            // ---- строка 7: прыжок и W под пальцем ----
+            AddLabel("Клавиша прыжка", 24, y);
+            _jumpKeyBtn = new Btn { Text = "Пробел", Kind = Btn.Look.Secondary, Font = Theme.BodyMedium, Bounds = new Rectangle(24, y + LabelGap, 120, h) };
+            _jumpKeyBtn.Click += (s, e) => PickKey(_jumpKeyBtn);
+            Controls.Add(_jumpKeyBtn);
+
+            _chkHeldMove = new Check { Text = "Учитывать W, зажатую рукой" };
+            _chkHeldMove.Bounds = new Rectangle(160, y + LabelGap + (h - 24) / 2, _chkHeldMove.FitWidth(), 24);
+            _chkHeldMove.CheckedChanged += (s, e) => { _a.RespectHeldMove = _chkHeldMove.Checked; };
+            Controls.Add(_chkHeldMove);
+
+            AddHint("для кайта: в прыжке W\nотпускается, потом возвращается", _chkHeldMove.Right + 16, y + LabelGap,
+                616 - _chkHeldMove.Right - 16, h);
+
+            y += Block;
+
             _chkFreeMods = new Check { Text = "Отпустить зажатые Ctrl / Alt / Shift перед началом" };
             _chkFreeMods.Bounds = new Rectangle(24, y, _chkFreeMods.FitWidth(), 24);
             _chkFreeMods.CheckedChanged += (s, e) => { _a.FreeMods = _chkFreeMods.Checked; };
@@ -424,7 +442,7 @@ namespace MacroKit.Ui
                 DialogResult = DialogResult.OK;
                 Close();
             });
-            _lblTotal.Bounds = new Rectangle(24, ok.Top, 260, ok.Height);
+            _lblTotal.Bounds = new Rectangle(24, ok.Top, 330, ok.Height);
         }
 
         void LoadValues()
@@ -450,7 +468,9 @@ namespace MacroKit.Ui
             _numTapGap.Value = _a.TapGapMs;
             _numTapGap.Enabled = _a.SkillTaps > 1;
             _chkFreeMods.Checked = _a.FreeMods;
+            _chkHeldMove.Checked = _a.RespectHeldMove;
             _moveBtn.Text = KeyNames.Get(_a.MoveVk);
+            _jumpKeyBtn.Text = KeyNames.Get(_a.JumpVk > 0 ? _a.JumpVk : 0x20);
 
             _loading = false;
 
@@ -468,7 +488,7 @@ namespace MacroKit.Ui
             _lblRun.Text = air ? "Бег после, мс" : "Держать, мс";
             _lblPreRun.Text = air ? "Разбег перед прыжком" : "Разбег до скилла, мс";
             _hintPreRun.Text = air ? "ноль — прыжок на месте,\nбег после — по желанию" : "с места прыжок не отменяет\nанимацию — нужен разбег";
-            _chkFreeMods.Top = _numTaps.Bottom + 20;
+            _chkFreeMods.Top = _jumpKeyBtn.Bottom + 20;
             UpdateTotal();
         }
 
@@ -489,7 +509,9 @@ namespace MacroKit.Ui
 
         void UpdateTotal()
         {
-            _lblTotal.Text = "Полная длительность: " + _a.SlideTotalMs + " мс";
+            int ms = _a.SlideTotalMs;
+            _lblTotal.Text = "Полная длительность: " + ms + " мс" +
+                (_fps > 0 ? "  ·  ≈ " + Math.Round(ms * _fps / 1000.0) + " кадр. при " + _fps + " FPS" : "");
         }
 
         void PickKey(Btn target)
@@ -500,6 +522,7 @@ namespace MacroKit.Ui
 
                 if (target == _skillBtn) { _a.Vk = dlg.CapturedVk; UpdateSkillText(); }
                 else if (target == _autoBtn) { _a.AutoVk = dlg.CapturedVk; UpdateAuto(); UpdateTotal(); }
+                else if (target == _jumpKeyBtn) { _a.JumpVk = dlg.CapturedVk; _jumpKeyBtn.Text = KeyNames.Get(_a.JumpVk); }
                 else { _a.MoveVk = dlg.CapturedVk; _moveBtn.Text = KeyNames.Get(_a.MoveVk); }
             }
         }

@@ -32,20 +32,42 @@ namespace MacroKit.Tests
         {
             Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-            var hook = new KeyboardHook((vk, down, injected) =>
+            // Не Windows (Mono на Linux): ни хука, ни SendInput. События ловим
+            // подменой отправки — так логика слайдов проверяется и без Windows.
+            // Тайминги там грубее, а клавиатуры нет вовсе: KeyState.AsyncDown — «ничего не зажато».
+            bool sinkMode = Environment.OSVersion.Platform != PlatformID.Win32NT;
+
+            KeyboardHook hook = null;
+            if (sinkMode)
             {
-                if (!injected) return false;
-
-                lock (Gate)
-                    Log.Add(new Ev { Vk = vk, Down = down, Ms = Clock == null ? 0 : Clock.Elapsed.TotalMilliseconds });
-
-                return true;   // глушим — наружу ничего не уходит
-            });
-
-            if (!hook.Start())
+                Console.WriteLine("(не Windows: события ловятся подменой InputSender.Sink, без хука)");
+                KeyState.AsyncDown = vk => false;
+                InputSender.Sink = (vk, down) =>
+                {
+                    lock (Gate)
+                        Log.Add(new Ev { Vk = vk, Down = down, Ms = Clock == null ? 0 : Clock.Elapsed.TotalMilliseconds });
+                };
+            }
+            else
             {
-                Console.WriteLine("НЕ УДАЛОСЬ поставить хук (код " + hook.LastError + ")");
-                return 2;
+                hook = new KeyboardHook((vk, down, injected) =>
+                {
+                    if (!injected) return false;
+
+                    // Зонд сторожа хука — служебный, в ленту не попадает
+                    if (vk == 0xE8) return true;
+
+                    lock (Gate)
+                        Log.Add(new Ev { Vk = vk, Down = down, Ms = Clock == null ? 0 : Clock.Elapsed.TotalMilliseconds });
+
+                    return true;   // глушим — наружу ничего не уходит
+                });
+
+                if (!hook.Start())
+                {
+                    Console.WriteLine("НЕ УДАЛОСЬ поставить хук (код " + hook.LastError + ")");
+                    return 2;
+                }
             }
 
             TimerResolution.Acquire();
@@ -62,11 +84,15 @@ namespace MacroKit.Tests
                 TestMultiKey();
                 TestWaitLog();
                 TestConflicts();
+                TestHeldMove();
+                TestJumpKey();
+                TestRunnerReuse();
+                TestMigrationAndInitials();
             }
             finally
             {
                 TimerResolution.Release();
-                hook.Dispose();
+                if (hook != null) hook.Dispose();
             }
 
             Console.WriteLine();
@@ -620,6 +646,178 @@ namespace MacroKit.Tests
                 Check("общая длительность ~440 мс", Math.Abs(total - 440) < 20, "440 ± 20 мс", total.ToString("F0") + " мс");
                 Check("W удерживается ~420 мс", Math.Abs(wHold - 420) < 20, "420 ± 20 мс", wHold.ToString("F0") + " мс");
             }
+        }
+
+        /// <summary>
+        /// W под пальцем (MacroAction.RespectHeldMove). Палец имитируется через
+        /// KeyState.OnPhysical — так же его видит движок из хука.
+        /// </summary>
+        static void TestHeldMove()
+        {
+            Head("W, зажатая рукой (кайт)");
+
+            const int W = 0x57;
+
+            // 1. Джампшот на бегу: W отпускается в воздухе и возвращается после
+            KeyState.ResetPhysical();
+            KeyState.OnPhysical(W, true);
+            var air = SlideDef(SlideMode.Air, true);
+            air.Actions[0].RunMs = 0;
+            var ev1 = RunAndCollect(air, 3000);
+            const string want1 = "Пробел↓ Пробел↑ W↑ 4↓ 4↑ W↓";
+            Check("в прыжке: W отпущена в воздухе и возвращена под палец", Describe(ev1) == want1, want1, Describe(ev1));
+            Check("после слайда W снова у пальца", !KeyState.IsOwned(W), "не занята", KeyState.IsOwned(W) ? "занята" : "не занята");
+
+            // 2. Тот же слайд со старым поведением: W пальца не трогается — так было
+            var oldAir = SlideDef(SlideMode.Air, false);
+            oldAir.Actions[0].RunMs = 0;
+            var ev2 = RunAndCollect(oldAir, 3000);
+            const string want2 = "Пробел↓ Пробел↑ 4↓ 4↑";
+            Check("старые слайды ведут себя по-прежнему", Describe(ev2) == want2, want2, Describe(ev2));
+
+            // 3. С места на бегу: остановка, слайд, и бег продолжается без W↑ в конце
+            var stand = SlideDef(SlideMode.Standing, true);
+            var ev3 = RunAndCollect(stand, 3000);
+            const string want3 = "W↑ 4↓ 4↑ W↓ Пробел↓ Пробел↑";
+            Check("с места на бегу: стоп, скилл, бег дальше", Describe(ev3) == want3, want3, Describe(ev3));
+
+            // 4. Палец отпустил W посреди слайда — в конце W отпущена
+            ResetLog();
+            var r4 = new MacroRunner(SlideDef(SlideMode.Standing, true));
+            r4.Trigger();
+            Thread.Sleep(150);
+            KeyState.OnPhysical(W, false);
+            WaitIdle(new[] { r4 }, 3000);
+            Thread.Sleep(80);
+            List<Ev> ev4;
+            lock (Gate) ev4 = new List<Ev>(Log);
+            r4.Dispose();
+            const string want4 = "W↑ 4↓ 4↑ W↓ Пробел↓ Пробел↑ W↑";
+            Check("палец отпустил W во время слайда — W отпущена", Describe(ev4) == want4, want4, Describe(ev4));
+
+            // 5. Слайд оборван посреди бега, палец держит W — W остаётся зажатой
+            KeyState.OnPhysical(W, true);
+            ResetLog();
+            var r5 = new MacroRunner(SlideDef(SlideMode.Standing, true));
+            r5.Trigger();
+            Thread.Sleep(150);
+            r5.StopNow();
+            WaitIdle(new[] { r5 }, 3000);
+            Thread.Sleep(80);
+            List<Ev> ev5;
+            lock (Gate) ev5 = new List<Ev>(Log);
+            r5.Dispose();
+            // Важно итоговое состояние W, а не порядок: последнее событие W — нажатие
+            bool wDown = false;
+            foreach (var e in ev5) if (e.Vk == W) wDown = e.Down;
+            Check("обрыв на бегу — W остаётся у пальца зажатой", wDown, "W в итоге зажата", Describe(ev5));
+            Check("обрыв отдал владение W", !KeyState.IsOwned(W), "не занята", KeyState.IsOwned(W) ? "занята" : "не занята");
+
+            KeyState.ResetPhysical();
+        }
+
+        static MacroDef SlideDef(SlideMode mode, bool respect)
+        {
+            var def = new MacroDef { Name = "slide", Repeat = RepeatMode.Once };
+            def.Actions.Add(new MacroAction
+            {
+                Kind = ActionKind.Slide,
+                Mode = mode,
+                Vk = 0x34,
+                Ms = 0,
+                CastMs = 20,
+                MoveVk = 0x57,
+                RunMs = 300,
+                Jump = true,
+                JumpAfterMs = 20,
+                ApexMs = 100,
+                LandMs = 100,
+                RespectHeldMove = respect
+            });
+            return def;
+        }
+
+        static void TestJumpKey()
+        {
+            Head("Своя клавиша прыжка");
+
+            KeyState.ResetPhysical();
+            var def = SlideDef(SlideMode.Standing, true);
+            def.Actions[0].JumpVk = 0x56;   // V
+            var ev = RunAndCollect(def, 3000);
+            const string want = "4↓ 4↑ W↓ V↓ V↑ W↑";
+            Check("прыжок на V", Describe(ev) == want, want, Describe(ev));
+        }
+
+        /// <summary>
+        /// Пересборка привязок не пересоздаёт неизменённые макросы: раньше любая
+        /// галочка в окне пересоздавала все потоки и обрывала то, что играло.
+        /// </summary>
+        static void TestRunnerReuse()
+        {
+            Head("Пересборка без пересоздания");
+
+            var cfg = new AppConfig();
+            var p = new Profile { Name = "т" };
+            cfg.Profiles.Add(p);
+            cfg.ActiveProfileId = p.Id;
+
+            var a = new MacroDef { Name = "a", TriggerVk = 0x31 };
+            a.Actions.Add(new MacroAction { Kind = ActionKind.KeyPress, Vk = 0x31, Ms = 5 });
+            var b = new MacroDef { Name = "b", TriggerVk = 0x32 };
+            b.Actions.Add(new MacroAction { Kind = ActionKind.KeyPress, Vk = 0x32, Ms = 5 });
+            p.Macros.Add(a);
+            p.Macros.Add(b);
+
+            using (var engine = new MacroEngine())
+            {
+                engine.Apply(cfg);
+                var before = engine.Runners;
+
+                b.Actions[0].Ms = 50;   // правим только b
+                engine.Apply(cfg);
+                var after = engine.Runners;
+
+                Check("проигрывателей столько же", before.Length == 2 && after.Length == 2, "2 и 2", before.Length + " и " + after.Length);
+                if (before.Length == 2 && after.Length == 2)
+                {
+                    Check("у неизменённого макроса тот же проигрыватель", ReferenceEquals(before[0], after[0]), "тот же", ReferenceEquals(before[0], after[0]) ? "тот же" : "новый");
+                    Check("у изменённого — новый", !ReferenceEquals(before[1], after[1]), "новый", ReferenceEquals(before[1], after[1]) ? "тот же" : "новый");
+                }
+            }
+        }
+
+        static void TestMigrationAndInitials()
+        {
+            Head("Новый профиль для слайдов и значки профилей");
+
+            var cfg = new AppConfig();
+            var p = new Profile { Name = "Лучник · слайды" };
+            var m = new MacroDef { Name = "слайд", TriggerVk = 0x34 };
+            m.Actions.Add(new MacroAction { Kind = ActionKind.Slide, Vk = 0x34, RespectHeldMove = false });
+            p.Macros.Add(m);
+            var plain = new Profile { Name = "Основной" };
+            plain.Macros.Add(new MacroDef { Name = "спам", TriggerVk = 0x31 });
+            cfg.Profiles.Add(p);
+            cfg.Profiles.Add(plain);
+            cfg.ActiveProfileId = p.Id;
+
+            ConfigStore.Migrate(cfg);
+
+            Check("появился ровно один новый профиль", cfg.Profiles.Count == 3, "3 профиля", cfg.Profiles.Count + " профиля");
+            if (cfg.Profiles.Count == 3)
+            {
+                var copy = cfg.Profiles[1];
+                Check("он стоит сразу за исходным", copy.Name == "Лучник · слайды · W рукой", "Лучник · слайды · W рукой", copy.Name);
+                Check("в копии новое поведение", copy.Macros[0].Actions[0].RespectHeldMove, "да", copy.Macros[0].Actions[0].RespectHeldMove ? "да" : "нет");
+                Check("исходный не тронут", !p.Macros[0].Actions[0].RespectHeldMove, "нет", p.Macros[0].Actions[0].RespectHeldMove ? "да" : "нет");
+                Check("активный профиль прежний", cfg.Active == p, "прежний", cfg.Active == p ? "прежний" : cfg.Active.Name);
+            }
+
+            ConfigStore.Migrate(cfg);
+            Check("повторно не срабатывает", cfg.Profiles.Count == 3, "3 профиля", cfg.Profiles.Count + " профиля");
+
+            Check("значок «Лучник · слайды» — ЛС", p.Initials == "ЛС", "ЛС", p.Initials);
         }
 
         // ---------- инфраструктура ----------

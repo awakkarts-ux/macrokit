@@ -30,7 +30,12 @@ namespace MacroKit
         uint _threadId;
         bool _disposed;
 
+        int _lastEventTick = Environment.TickCount;
+
         public bool IsRunning { get { return _hook != IntPtr.Zero; } }
+
+        /// <summary>Environment.TickCount последнего события, которое видел хук (свои инъекции тоже).</summary>
+        public int LastEventTick { get { return Volatile.Read(ref _lastEventTick); } }
         public int LastError { get; private set; }
 
         public KeyboardHook(KeyFilter filter)
@@ -44,6 +49,7 @@ namespace MacroKit
             if (_thread != null) return IsRunning;
 
             _ready.Reset();
+            Volatile.Write(ref _lastEventTick, Environment.TickCount);
             _thread = new Thread(ThreadProc);
             _thread.IsBackground = true;
             _thread.Name = "MacroKit.Hook";
@@ -75,11 +81,15 @@ namespace MacroKit
             _threadId = Native.GetCurrentThreadId();
             _proc = HookCallback;
 
-            _hook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, _proc, Native.GetModuleHandle(null), 0);
-            LastError = _hook == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            // Свой хэндл держим в локальной переменной: при перестановке хука
+            // сторожем старый поток может закончиться позже, чем стартует новый,
+            // и не должен снять чужой хук.
+            IntPtr h = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, _proc, Native.GetModuleHandle(null), 0);
+            LastError = h == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            _hook = h;
 
             _ready.Set();
-            if (_hook == IntPtr.Zero) return;
+            if (h == IntPtr.Zero) return;
 
             Native.MSG msg;
             while (Native.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
@@ -88,14 +98,15 @@ namespace MacroKit
                 Native.DispatchMessage(ref msg);
             }
 
-            Native.UnhookWindowsHookEx(_hook);
-            _hook = IntPtr.Zero;
+            Native.UnhookWindowsHookEx(h);
+            if (_hook == h) _hook = IntPtr.Zero;
         }
 
         IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
             if (nCode == Native.HC_ACTION)
             {
+                Volatile.Write(ref _lastEventTick, Environment.TickCount);
                 try
                 {
                     int msg = wParam.ToInt32();

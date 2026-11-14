@@ -557,6 +557,17 @@ namespace MacroKit.Ui
         bool _hover;
         bool _active;
         bool _add;
+        bool _badge;
+
+        /// <summary>Значок из Segoe MDL2 вместо букв профиля: кнопка настроек.</summary>
+        public bool IsIcon;
+
+        /// <summary>Цветная точка в углу: «есть что посмотреть» — например, обновление.</summary>
+        public bool Badge
+        {
+            get { return _badge; }
+            set { if (_badge == value) return; _badge = value; Invalidate(); }
+        }
 
         /// <summary>Кнопка «добавить профиль»: плашка с плюсом.</summary>
         public bool IsAdd
@@ -600,7 +611,17 @@ namespace MacroKit.Ui
             Color text = _active ? Theme.AccentInk : (_hover ? Theme.TextStrong : Theme.TextMuted);
 
             Theme.FillRound(g, icon, Theme.Radius, bg);
-            Theme.TextCenter(g, Text, Theme.Strong, icon, text);
+            Theme.TextCenter(g, Text, IsIcon ? Theme.Icon : Theme.Strong, icon, text);
+
+            if (_badge)
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                var dot = new Rectangle(icon.Right - 9, icon.Top - 1, 10, 10);
+                using (var ring = new SolidBrush(Parent != null ? Parent.BackColor : Theme.Surface))
+                    g.FillEllipse(ring, Rectangle.Inflate(dot, 2, 2));
+                using (var b = new SolidBrush(Theme.Hot[0]))
+                    g.FillEllipse(b, dot);
+            }
         }
     }
 

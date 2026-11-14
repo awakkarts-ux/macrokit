@@ -3,6 +3,11 @@
 # Внешних зависимостей нет: компилятор Roslyn от VS Build Tools либо встроенный csc,
 # библиотеки — из .NET Framework, который есть в каждой Windows.
 
+param(
+    # Версия сборки. По умолчанию — из файла VERSION в корне.
+    [string]$Version = ''
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -61,12 +66,41 @@ if (Test-Path $iconPath) {
 $fontArgs = Get-ChildItem -Path (Join-Path $root 'fonts\ui') -Filter *.ttf -ErrorAction SilentlyContinue |
     ForEach-Object { "/resource:$($_.FullName),MacroKit.Fonts.$($_.Name)" }
 
+# ---- версия ----
+# Один источник правды — файл VERSION. Из него же берут номер установщик
+# (installer\MacroKit.iss) и выпуск на GitHub; программа сравнивает его с
+# последним релизом, когда проверяет обновления.
+if (-not $Version) {
+    $versionFile = Join-Path $root 'VERSION'
+    if (Test-Path $versionFile) { $Version = (Get-Content $versionFile -Raw).Trim() } else { $Version = '0.0.0' }
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+    Write-Host "  Версия '$Version' не похожа на X.Y.Z" -ForegroundColor Red
+    exit 1
+}
+
+$obj = Join-Path $root 'obj'
+if (-not (Test-Path $obj)) { New-Item -ItemType Directory -Path $obj | Out-Null }
+$assemblyInfo = Join-Path $obj 'AssemblyInfo.g.cs'
+@"
+// Создаётся build.ps1 из файла VERSION — руками не править.
+using System.Reflection;
+[assembly: AssemblyTitle("MacroKit")]
+[assembly: AssemblyProduct("MacroKit")]
+[assembly: AssemblyDescription("Макросы для клавиатуры")]
+[assembly: AssemblyCompany("awakkarts-ux")]
+[assembly: AssemblyVersion("$Version.0")]
+[assembly: AssemblyFileVersion("$Version.0")]
+[assembly: AssemblyInformationalVersion("$Version")]
+"@ | Set-Content -Path $assemblyInfo -Encoding UTF8
+
 # ---- исходники ----
-$files = Get-ChildItem -Path $src -Recurse -Filter *.cs | ForEach-Object { $_.FullName }
+$files = @(Get-ChildItem -Path $src -Recurse -Filter *.cs | ForEach-Object { $_.FullName }) + $assemblyInfo
 
 Write-Host ""
 Write-Host "  Компилятор : $csc" -ForegroundColor DarkGray
 Write-Host "  Библиотеки : $refDir" -ForegroundColor DarkGray
+Write-Host "  Версия     : $Version" -ForegroundColor DarkGray
 Write-Host "  Файлов     : $($files.Count)" -ForegroundColor DarkGray
 Write-Host ""
 

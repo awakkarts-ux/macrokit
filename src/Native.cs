@@ -174,6 +174,49 @@ namespace MacroKit
         [DllImport("winmm.dll")]
         public static extern uint timeEndPeriod(uint uPeriod);
 
+        // ---------- Активное окно и его процесс ----------
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool QueryFullProcessImageName(IntPtr hProcess, uint flags,
+            System.Text.StringBuilder exeName, ref uint size);
+
+        // ---------- Последний ввод в системе ----------
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct LASTINPUTINFO
+        {
+            public uint cbSize;
+            public uint dwTime;
+        }
+
+        [DllImport("user32.dll")]
+        static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+        /// <summary>TickCount последнего ввода с клавиатуры или мыши; 0 — не узнать.</summary>
+        public static int LastInputTick()
+        {
+            try
+            {
+                var li = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) };
+                return GetLastInputInfo(ref li) ? unchecked((int)li.dwTime) : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
         // ---------- Окно ----------
 
         [DllImport("user32.dll")]
