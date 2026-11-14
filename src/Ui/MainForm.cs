@@ -1036,6 +1036,18 @@ namespace MacroKit.Ui
                 Ms = kind == ActionKind.Delay ? 100 : (kind == ActionKind.Slide ? 0 : 30)
             };
 
+            // Новый слайд — сразу с настройками, проверенными в бою (14.11):
+            // удержание 0, W, держать 300, разбег 0, прыжок через 10, каст 20
+            if (kind == ActionKind.Slide)
+            {
+                a.MoveVk = 0x57;
+                a.RunMs = 300;
+                a.PreRunMs = 0;
+                a.Jump = true;
+                a.JumpAfterMs = 10;
+                a.CastMs = 20;
+            }
+
             if (!EditAction(a)) return;
 
             int at = _selectedAction >= 0 && _selectedAction < _current.Actions.Count

@@ -851,7 +851,7 @@ namespace MacroKit.Tests
                 r2.Dispose();
                 string l2 = Last(lines);
                 Check("обрыв: причина в журнале", l2.Contains("ПРЕРВАН (начался другой слайд: тест)"), "ПРЕРВАН (начался другой слайд: тест)", l2);
-                Check("пометка слайда в ленте", l2.Contains("[слайд с места, W рукой]"), "[слайд с места, W рукой]", l2);
+                Check("пометка слайда в ленте", l2.Contains("[слайд, W рукой]"), "[слайд, W рукой]", l2);
 
                 // 3. Спам «пока держу» — одна строка-итог
                 var spam = new MacroDef { Name = "спам", Repeat = RepeatMode.WhileHeld, GapMs = 20 };

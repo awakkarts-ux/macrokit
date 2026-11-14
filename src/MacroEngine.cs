@@ -344,7 +344,7 @@ namespace MacroKit
 
             if (own) KeyState.Own(a.MoveVk);
             _moveLeftDown = false;
-            InputSender.TraceNote("[слайд " + (a.Mode == SlideMode.Air ? "в прыжке" : "с места") + (own ? ", W рукой" : "") + "]");
+            InputSender.TraceNote("[слайд" + (a.Mode == SlideMode.Air ? " в прыжке" : "") + (own ? ", W рукой" : "") + "]");
 
             try
             {

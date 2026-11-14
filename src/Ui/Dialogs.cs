@@ -227,16 +227,12 @@ namespace MacroKit.Ui
         readonly MacroEngine _engine;
 
         Btn _skillBtn, _moveBtn, _autoBtn, _autoClear, _jumpKeyBtn;
-        Combo _cbMode;
         Check _chkCtrl, _chkAlt, _chkShift, _chkJump, _chkFreeMods, _chkFromTrigger, _chkHeldMove;
         readonly int _fps;
-        NumField _numHold, _numCast, _numRun, _numPreRun, _numJumpAfter, _numAutoGap, _numApex, _numLand, _numTaps, _numTapGap;
+        NumField _numHold, _numCast, _numRun, _numPreRun, _numJumpAfter, _numAutoGap, _numTaps, _numTapGap;
         SectionLabel _lblRun, _lblPreRun;
         Label _lblTotal, _hintPreRun;
 
-        // Строки, которые есть только у одного вида слайда
-        readonly System.Collections.Generic.List<Control> _standingOnly = new System.Collections.Generic.List<Control>();
-        readonly System.Collections.Generic.List<Control> _airOnly = new System.Collections.Generic.List<Control>();
 
         bool _loading;
 
@@ -246,6 +242,12 @@ namespace MacroKit.Ui
             _a = action;
             _engine = engine;
             _fps = fps;
+
+            // Вид «в прыжке» (джампшот) убран: в игре он не сработал ни при каком
+            // тайминге, а обычный слайд работает и с места, и в прыжке. Слайд
+            // старого вида при правке становится обычным (окно правит копию —
+            // без «Готово» ничего не меняется).
+            _a.Mode = SlideMode.Standing;
 
             Build();
             LoadValues();
@@ -266,17 +268,6 @@ namespace MacroKit.Ui
             _numHold = new NumField { Bounds = new Rectangle(260, y + LabelGap, 120, h), Min = 0, Max = 5000 };
             _numHold.ValueChanged += (s, e) => { _a.Ms = _numHold.Value; UpdateTotal(); };
             Controls.Add(_numHold);
-
-            AddLabel("Вид слайда", 396, y);
-            _cbMode = new Combo { Bounds = new Rectangle(396, y + LabelGap, 220, h) };
-            _cbMode.Items.AddRange(new object[] { "С места", "В прыжке" });
-            _cbMode.SelectedIndexChanged += (s, e) =>
-            {
-                if (_loading) return;
-                _a.Mode = _cbMode.SelectedIndex == 1 ? SlideMode.Air : SlideMode.Standing;
-                UpdateMode();
-            };
-            Controls.Add(_cbMode);
 
             y += Block;
 
@@ -355,35 +346,17 @@ namespace MacroKit.Ui
             _chkJump.Bounds = new Rectangle(24, y + LabelGap + (h - 24) / 2, 120, 24);
             _chkJump.CheckedChanged += (s, e) => { _a.Jump = _chkJump.Checked; _numJumpAfter.Enabled = _chkJump.Checked; };
             Controls.Add(_chkJump);
-            _standingOnly.Add(_chkJump);
 
-            _standingOnly.Add(AddLabel("Через, мс", 160, y));
+            AddLabel("Через, мс", 160, y);
             _numJumpAfter = new NumField { Bounds = new Rectangle(160, y + LabelGap, 120, h), Min = 0, Max = 10000 };
             _numJumpAfter.ValueChanged += (s, e) => { _a.JumpAfterMs = _numJumpAfter.Value; };
             Controls.Add(_numJumpAfter);
-            _standingOnly.Add(_numJumpAfter);
 
-            _standingOnly.Add(AddLabel("Пауза на каст, мс", 296, y));
+            AddLabel("Пауза на каст, мс", 296, y);
             _numCast = new NumField { Bounds = new Rectangle(296, y + LabelGap, 120, h), Min = 0, Max = 10000 };
             _numCast.ValueChanged += (s, e) => { _a.CastMs = _numCast.Value; UpdateTotal(); };
             Controls.Add(_numCast);
-            _standingOnly.Add(_numCast);
-            _standingOnly.Add(AddHint("инстанты 20 мс, кастуемые —\nвремя каста", 432, y + LabelGap, 184, h));
-
-            // ---- строка 5, в прыжке: тайминги полёта ----
-            _airOnly.Add(AddLabel("Скилл после прыжка, мс", 24, y));
-            _numApex = new NumField { Bounds = new Rectangle(24, y + LabelGap, 120, h), Min = 0, Max = 3000 };
-            _numApex.ValueChanged += (s, e) => { _a.ApexMs = _numApex.Value; UpdateTotal(); };
-            Controls.Add(_numApex);
-            _airOnly.Add(_numApex);
-
-            _airOnly.Add(AddLabel("Ждать приземления, мс", 208, y));
-            _numLand = new NumField { Bounds = new Rectangle(208, y + LabelGap, 120, h), Min = 0, Max = 3000 };
-            _numLand.ValueChanged += (s, e) => { _a.LandMs = _numLand.Value; UpdateTotal(); };
-            Controls.Add(_numLand);
-            _airOnly.Add(_numLand);
-
-            _airOnly.Add(AddHint("скилл — после верхней точки прыжка;\nдвижение до приземления сорвёт выстрел", 344, y + LabelGap, 272, h));
+            AddHint("инстанты 20 мс, кастуемые —\nвремя каста", 432, y + LabelGap, 184, h);
 
             y += Block;
 
@@ -413,7 +386,7 @@ namespace MacroKit.Ui
             _chkHeldMove.CheckedChanged += (s, e) => { _a.RespectHeldMove = _chkHeldMove.Checked; };
             Controls.Add(_chkHeldMove);
 
-            AddHint("для кайта: в прыжке W\nотпускается, потом возвращается", _chkHeldMove.Right + 16, y + LabelGap,
+            AddHint("для кайта: на бегу слайд сам\nостановит, в конце — бег дальше", _chkHeldMove.Right + 16, y + LabelGap,
                 616 - _chkHeldMove.Right - 16, h);
 
             y += Block;
@@ -453,7 +426,6 @@ namespace MacroKit.Ui
             _chkAlt.Checked = _a.SkillAlt;
             _chkShift.Checked = _a.SkillShift;
             _chkFromTrigger.Checked = _a.Vk == MacroAction.TriggerKey;
-            _cbMode.SelectedIndex = _a.Mode == SlideMode.Air ? 1 : 0;
             _numHold.Value = _a.Ms;
             _numCast.Value = _a.CastMs;
             _numRun.Value = _a.RunMs;
@@ -462,8 +434,6 @@ namespace MacroKit.Ui
             _numJumpAfter.Value = _a.JumpAfterMs;
             _numJumpAfter.Enabled = _a.Jump;
             _numAutoGap.Value = _a.AutoGapMs;
-            _numApex.Value = _a.ApexMs;
-            _numLand.Value = _a.LandMs;
             _numTaps.Value = _a.SkillTaps;
             _numTapGap.Value = _a.TapGapMs;
             _numTapGap.Enabled = _a.SkillTaps > 1;
@@ -481,13 +451,9 @@ namespace MacroKit.Ui
 
         void UpdateMode()
         {
-            bool air = _a.Mode == SlideMode.Air;
-            foreach (var c in _standingOnly) c.Visible = !air;
-            foreach (var c in _airOnly) c.Visible = air;
-
-            _lblRun.Text = air ? "Бег после, мс" : "Держать, мс";
-            _lblPreRun.Text = air ? "Разбег перед прыжком" : "Разбег до скилла, мс";
-            _hintPreRun.Text = air ? "ноль — прыжок на месте,\nбег после — по желанию" : "с места прыжок не отменяет\nанимацию — нужен разбег";
+            _lblRun.Text = "Держать, мс";
+            _lblPreRun.Text = "Разбег до скилла, мс";
+            _hintPreRun.Text = "проверено в бою: 0";
             _chkFreeMods.Top = _jumpKeyBtn.Bottom + 20;
             UpdateTotal();
         }
