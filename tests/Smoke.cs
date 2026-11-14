@@ -88,6 +88,7 @@ namespace MacroKit.Tests
                 TestJumpKey();
                 TestRunnerReuse();
                 TestMigrationAndInitials();
+                TestJournal();
             }
             finally
             {
@@ -818,6 +819,68 @@ namespace MacroKit.Tests
             Check("повторно не срабатывает", cfg.Profiles.Count == 3, "3 профиля", cfg.Profiles.Count + " профиля");
 
             Check("значок «Лучник · слайды» — ЛС", p.Initials == "ЛС", "ЛС", p.Initials);
+        }
+
+        /// <summary>Журнал пишет все макросы: разовые — лентой, повторяющиеся — итогом, с причиной обрыва.</summary>
+        static void TestJournal()
+        {
+            Head("Журнал макросов");
+
+            var lines = new List<string>();
+            Journal.Sink = (file, line) => { lock (lines) lines.Add(line); };
+            MacroRunner.JournalOn = true;
+
+            try
+            {
+                // 1. Разовый макрос из обычных шагов — лента целиком
+                var once = new MacroDef { Name = "разовый", Repeat = RepeatMode.Once };
+                once.Actions.Add(new MacroAction { Kind = ActionKind.KeyPress, Vk = 0x41, Ms = 5 });
+                RunAndCollect(once, 2000);
+                string l1 = Last(lines);
+                Check("разовый: лента событий", l1.StartsWith("разовый [один раз]:") && l1.Contains("A↓") && l1.Contains("A↑"), "разовый [один раз]: … A↓ … A↑", l1);
+
+                // 2. Слайд оборван — причина и пометка слайда
+                KeyState.ResetPhysical();
+                ResetLog();
+                var r2 = new MacroRunner(SlideDef(SlideMode.Standing, true));
+                r2.Trigger();
+                Thread.Sleep(120);
+                r2.StopNow("начался другой слайд: тест");
+                WaitIdle(new[] { r2 }, 3000);
+                Thread.Sleep(50);
+                r2.Dispose();
+                string l2 = Last(lines);
+                Check("обрыв: причина в журнале", l2.Contains("ПРЕРВАН (начался другой слайд: тест)"), "ПРЕРВАН (начался другой слайд: тест)", l2);
+                Check("пометка слайда в ленте", l2.Contains("[слайд с места, W рукой]"), "[слайд с места, W рукой]", l2);
+
+                // 3. Спам «пока держу» — одна строка-итог
+                var spam = new MacroDef { Name = "спам", Repeat = RepeatMode.WhileHeld, GapMs = 20 };
+                spam.Actions.Add(new MacroAction { Kind = ActionKind.KeyPress, Vk = 0x32, Ms = 10 });
+                int before;
+                lock (lines) before = lines.Count;
+                var r3 = new MacroRunner(spam);
+                r3.Trigger();
+                Thread.Sleep(300);
+                r3.Release();
+                WaitIdle(new[] { r3 }, 2000);
+                Thread.Sleep(50);
+                r3.Dispose();
+                int added;
+                lock (lines) added = lines.Count - before;
+                string l3 = Last(lines);
+                Check("спам: одна строка на весь проигрыш", added == 1, "1", added.ToString());
+                Check("спам: итог проходов", l3.StartsWith("спам [пока держу]:") && l3.Contains("прох.") && !l3.Contains("2↓"), "спам [пока держу]: N прох. за …", l3);
+            }
+            finally
+            {
+                MacroRunner.JournalOn = false;
+                Journal.Sink = null;
+            }
+        }
+
+        static string Last(List<string> lines)
+        {
+            lock (lines) return lines.Count == 0 ? "(пусто)" : lines[lines.Count - 1];
         }
 
         // ---------- инфраструктура ----------

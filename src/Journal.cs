@@ -15,8 +15,14 @@ namespace MacroKit
         const long MaxBytes = 2 * 1024 * 1024;
         static readonly object Gate = new object();
 
+        /// <summary>Подмена для тестов: (файл, строка) приходят сюда, на диск ничего не пишется.</summary>
+        public static Action<string, string> Sink;
+
         public static void Append(string fileName, string line)
         {
+            var sink = Sink;
+            if (sink != null) { sink(fileName, line); return; }
+
             string path = Path.Combine(ConfigStore.Dir, fileName);
             string text = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + line + Environment.NewLine;
 

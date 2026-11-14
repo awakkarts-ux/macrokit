@@ -124,7 +124,8 @@ namespace MacroKit
             cfg.ChatPause = B(root, "chatPause", false);
             cfg.ToggleVk = I(root, "toggleVk", cfg.ToggleVk);
             cfg.GameFps = Math.Max(0, I(root, "gameFps", 0));
-            cfg.SlideJournal = B(root, "slideJournal", false);
+            // до 1.0.2 журнал писал только слайды и назывался slideJournal
+            cfg.MacroJournal = B(root, "macroJournal", B(root, "slideJournal", false));
 
             object rawMigrations;
             if (root.TryGetValue("migrations", out rawMigrations) && rawMigrations is object[])
@@ -313,7 +314,7 @@ namespace MacroKit
             sb.Append("  \"chatPause\": ").Append(cfg.ChatPause ? "true" : "false").Append(",\n");
             sb.Append("  \"toggleVk\": ").Append(cfg.ToggleVk).Append(",\n");
             sb.Append("  \"gameFps\": ").Append(cfg.GameFps).Append(",\n");
-            sb.Append("  \"slideJournal\": ").Append(cfg.SlideJournal ? "true" : "false").Append(",\n");
+            sb.Append("  \"macroJournal\": ").Append(cfg.MacroJournal ? "true" : "false").Append(",\n");
             {
                 var ms = new List<string>();
                 foreach (var mg in cfg.Migrations) ms.Add(Q(mg));

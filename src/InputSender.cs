@@ -71,6 +71,15 @@ namespace MacroKit
             return t == null ? "" : t.ToString();
         }
 
+        /// <summary>Пометка в ленте: «[слайд с места, W рукой]».</summary>
+        public static void TraceNote(string note)
+        {
+            var t = _trace;
+            if (t == null) return;
+            if (t.Length > 0) t.Append("  ");
+            t.Append(note);
+        }
+
         static void Trace(string name, bool down)
         {
             var t = _trace;

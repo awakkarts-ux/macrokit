@@ -535,8 +535,8 @@ namespace MacroKit
         /// <summary>FPS игры — чтобы показывать тайминги ещё и в кадрах. 0 — не показывать.</summary>
         public int GameFps;
 
-        /// <summary>Писать ленту событий каждого слайда в slides-timing.txt.</summary>
-        public bool SlideJournal;
+        /// <summary>Писать каждый проигрыш макроса в macros-timing.txt (см. MacroRunner.WriteJournal).</summary>
+        public bool MacroJournal;
 
         /// <summary>Выполненные одноразовые переделки конфига (см. ConfigStore.Migrate).</summary>
         public List<string> Migrations = new List<string>();

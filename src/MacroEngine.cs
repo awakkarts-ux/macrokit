@@ -47,8 +47,14 @@ namespace MacroKit
         /// <summary>Отпечаток определения (ConfigStore.Fingerprint): по нему движок переиспользует проигрыватель.</summary>
         public string Fingerprint { get; private set; }
 
-        /// <summary>Писать ленту событий каждого слайда в slides-timing.txt (AppConfig.SlideJournal).</summary>
-        public static volatile bool SlideJournal;
+        /// <summary>Писать каждый проигрыш в журнал macros-timing.txt (AppConfig.MacroJournal).</summary>
+        public static volatile bool JournalOn;
+
+        public const string JournalFile = "macros-timing.txt";
+
+        // Почему проигрыш оборвали — для журнала. Первая причина побеждает.
+        volatile string _stopReason;
+        int _passes;
 
         // Слайд закончился, оставив клавишу движения зажатой под палец пользователя
         bool _moveLeftDown;
@@ -91,7 +97,7 @@ namespace MacroKit
                     if (_toggle)
                     {
                         _toggle = false;
-                        _stop.Set();
+                        Stop("выключен повторным нажатием");
                     }
                     else
                     {
@@ -108,11 +114,11 @@ namespace MacroKit
                             case Retrigger.Ignore:
                                 return;
                             case Retrigger.Stop:
-                                _stop.Set();
+                                Stop("остановлен повторным нажатием");
                                 return;
                             default:
                                 Interlocked.Exchange(ref _pendingRestart, 1);
-                                _stop.Set();
+                                Stop("перезапущен повторным нажатием");
                                 return;
                         }
                     }
@@ -128,9 +134,21 @@ namespace MacroKit
 
         public void StopNow()
         {
+            StopNow("остановлен");
+        }
+
+        /// <summary>Остановить с причиной — она попадёт в журнал.</summary>
+        public void StopNow(string reason)
+        {
             _held = false;
             _toggle = false;
             Interlocked.Exchange(ref _pendingRestart, 0);
+            Stop(reason);
+        }
+
+        void Stop(string reason)
+        {
+            if (_running && _stopReason == null) _stopReason = reason;
             _stop.Set();
         }
 
@@ -150,12 +168,22 @@ namespace MacroKit
                     if (_def.Repeat == RepeatMode.Toggle && !_toggle) break;
 
                     _stop.Reset();
+                    _stopReason = null;
+                    _passes = 0;
+
+                    bool journal = JournalOn;
+                    bool repeating = _def.Repeat == RepeatMode.WhileHeld || _def.Repeat == RepeatMode.Toggle;
+                    var clock = Stopwatch.StartNew();
+                    if (journal && !repeating) InputSender.BeginTrace();
+
                     SetRunning(true);
 
-                    try { Play(); }
-                    catch { }
+                    bool ok;
+                    try { ok = Play(); }
+                    catch (Exception ex) { ok = false; _stopReason = "ошибка: " + ex.Message; }
 
                     ReleaseAll();
+                    if (journal) WriteJournal(ok, repeating, clock.Elapsed.TotalMilliseconds);
                     SetRunning(false);   // порядок важен: сначала снимаем флаг, потом читаем restart
 
                     again = Interlocked.Exchange(ref _pendingRestart, 0) == 1 && !_disposing;
@@ -166,45 +194,76 @@ namespace MacroKit
             ReleaseAll();
         }
 
-        void Play()
+        /// <summary>Весь проигрыш по режиму повтора. false — оборван.</summary>
+        bool Play()
         {
             switch (_def.Repeat)
             {
                 case RepeatMode.Once:
-                    PlayOnce();
-                    break;
+                    return PlayOnce();
 
                 case RepeatMode.Count:
                     for (int i = 0; i < _def.RepeatCount; i++)
                     {
-                        if (!PlayOnce()) return;
-                        if (i < _def.RepeatCount - 1 && _def.GapMs > 0 && !_waiter.Wait(_def.GapMs)) return;
+                        if (!PlayOnce()) return false;
+                        if (i < _def.RepeatCount - 1 && _def.GapMs > 0 && !_waiter.Wait(_def.GapMs)) return false;
                     }
-                    break;
+                    return true;
 
                 case RepeatMode.WhileHeld:
                     while (_held && !_disposing)
                     {
-                        if (!PlayOnce()) return;
+                        if (!PlayOnce()) return false;
                         if (!_held) break;
-                        if (_def.GapMs > 0 && !_waiter.Wait(_def.GapMs)) return;
+                        if (_def.GapMs > 0 && !_waiter.Wait(_def.GapMs)) return false;
                     }
-                    break;
+                    return true;
 
                 case RepeatMode.Toggle:
                     while (_toggle && !_disposing)
                     {
-                        if (!PlayOnce()) return;
+                        if (!PlayOnce()) return false;
                         if (!_toggle) break;
-                        if (_def.GapMs > 0 && !_waiter.Wait(_def.GapMs)) return;
+                        if (_def.GapMs > 0 && !_waiter.Wait(_def.GapMs)) return false;
                     }
-                    break;
+                    return true;
             }
+            return true;
+        }
+
+        /// <summary>
+        /// Строка журнала. Разовые макросы — лента событий целиком: что ушло в
+        /// игру и через сколько миллисекунд. Повторяющиеся («пока держу»,
+        /// тумблер) — одна строка-итог при остановке: лента спама в 30 нажатий в
+        /// секунду журнал бы просто утопила.
+        /// </summary>
+        void WriteJournal(bool ok, bool repeating, double totalMs)
+        {
+            string reason = _stopReason;
+            var sb = new System.Text.StringBuilder();
+            sb.Append(_def.Name).Append(" [").Append(_def.RepeatText).Append(']');
+
+            if (repeating)
+            {
+                sb.Append(":  ").Append(_passes).Append(" прох. за ").Append(totalMs.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)).Append(" мс");
+                if (_passes > 0)
+                    sb.Append(", в среднем ").Append((totalMs / _passes).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(" мс");
+                if (!ok || (reason != null && reason != "выключен повторным нажатием"))
+                    sb.Append("  — ").Append(reason ?? "оборван");
+            }
+            else
+            {
+                if (!ok) sb.Append(" ПРЕРВАН (").Append(reason ?? "без причины").Append(')');
+                sb.Append(":  ").Append(InputSender.EndTrace());
+            }
+
+            Journal.Append(JournalFile, sb.ToString());
         }
 
         /// <summary>Один проход по списку действий. false — прервано.</summary>
         bool PlayOnce()
         {
+            _passes++;
             var actions = _def.Actions;
 
             for (int i = 0; i < actions.Count; i++)
@@ -282,27 +341,18 @@ namespace MacroKit
         bool PlaySlide(MacroAction a)
         {
             bool own = a.RespectHeldMove && a.MoveVk > 0;
-            bool trace = SlideJournal;
 
             if (own) KeyState.Own(a.MoveVk);
-            if (trace) InputSender.BeginTrace();
             _moveLeftDown = false;
+            InputSender.TraceNote("[слайд " + (a.Mode == SlideMode.Air ? "в прыжке" : "с места") + (own ? ", W рукой" : "") + "]");
 
-            bool ok = false;
             try
             {
-                ok = a.Mode == SlideMode.Air ? PlayAirSlide(a, own) : PlayStandingSlide(a, own);
-                return ok;
+                return a.Mode == SlideMode.Air ? PlayAirSlide(a, own) : PlayStandingSlide(a, own);
             }
             finally
             {
                 if (own) ReturnMove(a);
-                if (trace)
-                {
-                    string tape = InputSender.EndTrace();
-                    Journal.Append("slides-timing.txt", _def.Name + " [" + (a.Mode == SlideMode.Air ? "в прыжке" : "с места") +
-                        (own ? ", W рукой" : "") + "]" + (ok ? "" : " ПРЕРВАН") + ":  " + tape);
-                }
             }
         }
 
@@ -521,6 +571,7 @@ namespace MacroKit
             }
 
             ChatLog.Journal(_def.Name + ": " + (_stop.WaitOne(0) ? "прервано" : "не дождались за " + a.Ms + " мс") + ", слайда не было");
+            if (_stopReason == null) _stopReason = "нет строки в логе за " + a.Ms + " мс";
             return false;
         }
 
@@ -623,7 +674,7 @@ namespace MacroKit
 
             _held = false;
             _toggle = false;
-            _stop.Set();
+            Stop("макросы пересобраны (правка или смена профиля)");
             _shutdown.Set();
 
             _thread.Join(2000);
@@ -802,7 +853,7 @@ namespace MacroKit
             if (!active)
             {
                 _chatPaused = false;
-                StopAll();
+                StopAll("ушёл из окна игры");
             }
             RaiseChanged();
         }
@@ -814,7 +865,7 @@ namespace MacroKit
             {
                 if (_enabled == value) return;
                 _enabled = value;
-                if (!value) StopAll();
+                if (!value) StopAll("движок выключен");
                 RaiseChanged();
             }
         }
@@ -957,7 +1008,7 @@ namespace MacroKit
             _toggleVk = cfg.ToggleVk;
             _chatPauseOn = cfg.ChatPause;
             if (!cfg.ChatPause) _chatPaused = false;
-            MacroRunner.SlideJournal = cfg.SlideJournal;
+            MacroRunner.JournalOn = cfg.MacroJournal;
 
             _enabled = cfg.EngineEnabled;
             RaiseChanged();
@@ -1018,12 +1069,17 @@ namespace MacroKit
 
         public void StopAll()
         {
+            StopAll("остановлены все");
+        }
+
+        public void StopAll(string reason)
+        {
             MacroRunner[] snapshot;
             lock (_gate) snapshot = _runners;
-            foreach (var r in snapshot) r.StopNow();
+            foreach (var r in snapshot) r.StopNow(reason);
 
             var t = _testRunner;
-            if (t != null) t.StopNow();
+            if (t != null) t.StopNow(reason);
         }
 
         public bool AnyRunning
@@ -1139,7 +1195,7 @@ namespace MacroKit
                 {
                     _toggleHeld = true;
                     _enabled = !_enabled;
-                    if (!_enabled) StopAll();
+                    if (!_enabled) StopAll("движок выключен клавишей");
                     RaiseChanged();
                 }
                 else if (!down)
@@ -1176,7 +1232,7 @@ namespace MacroKit
                 if (down && vk == 0x0D)
                 {
                     _chatPaused = !_chatPaused;
-                    if (_chatPaused) StopAll();
+                    if (_chatPaused) StopAll("пауза на чат (Enter)");
                     RaiseChanged();
                     return false;
                 }
@@ -1255,7 +1311,7 @@ namespace MacroKit
                     {
                         var slides = Volatile.Read(ref _slideRunners);
                         for (int j = 0; j < slides.Length; j++)
-                            if (slides[j] != b.Runner && slides[j].IsRunning) slides[j].StopNow();
+                            if (slides[j] != b.Runner && slides[j].IsRunning) slides[j].StopNow("начался другой слайд: " + d.Name);
                     }
 
                     b.Runner.Trigger();

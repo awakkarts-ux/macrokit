@@ -147,7 +147,7 @@ namespace MacroKit.Ui
             y += Block;
 
             // ---- журнал ----
-            _chkJournal = new Check { Text = "Журнал слайдов: лента событий в slides-timing.txt", Checked = _cfg.SlideJournal };
+            _chkJournal = new Check { Text = "Журнал макросов: что ушло в игру — в " + MacroRunner.JournalFile, Checked = _cfg.MacroJournal };
             _chkJournal.Bounds = new Rectangle(24, y + 14, _chkJournal.FitWidth(), 24);
             Controls.Add(_chkJournal);
 
@@ -226,7 +226,7 @@ namespace MacroKit.Ui
             _cfg.ChatPause = _chkChat.Checked;
             _cfg.ToggleVk = _toggleVk;
             _cfg.GameFps = _fps.Value;
-            _cfg.SlideJournal = _chkJournal.Checked;
+            _cfg.MacroJournal = _chkJournal.Checked;
         }
 
         void UpdateEnabled()
