@@ -522,6 +522,13 @@ namespace MacroKit
         /// </summary>
         public bool ChatPause;
 
+        /// <summary>
+        /// Запускаться от администратора. Игра на сервере запущена с правами, а
+        /// без них Windows не пускает к её окну ни хук, ни SendInput (см. Elevation).
+        /// По умолчанию включено; выключить — в настройках.
+        /// </summary>
+        public bool RunAsAdmin = true;
+
         /// <summary>Клавиша, которая включает и выключает движок. 0 — нет. По умолчанию Pause.</summary>
         public int ToggleVk = 0x13;
 

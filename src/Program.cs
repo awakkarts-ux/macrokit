@@ -7,12 +7,29 @@ namespace MacroKit
     static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            // Игра запущена от администратора — без прав макросы её окна не видят
+            // (см. Elevation). Поднимаемся один раз: после отказа в UAC второй раз
+            // не спрашиваем и работаем как есть.
+            bool afterElevation = Array.IndexOf(args, Elevation.ElevatedArg) >= 0;
+            if (!afterElevation && !Elevation.IsElevated && ConfigStore.PeekRunAsAdmin())
+            {
+                if (Elevation.RelaunchElevated()) return;
+            }
+
             // Два экземпляра поставят два хука и будут дублировать нажатия.
             bool isNew;
             using (var mutex = new Mutex(true, "MacroKit.SingleInstance", out isNew))
             {
+                // Перезапуск от администратора стартует, пока прежний экземпляр
+                // ещё закрывается, — даём ему пару секунд
+                if (!isNew && afterElevation)
+                {
+                    try { isNew = mutex.WaitOne(3000); }
+                    catch (AbandonedMutexException) { isNew = true; }
+                }
+
                 if (!isNew)
                 {
                     MessageBox.Show("MacroKit уже запущен.", "MacroKit",

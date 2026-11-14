@@ -16,6 +16,16 @@ namespace MacroKit
     {
         static IntPtr _lastHwnd;
         static string _lastFile;
+        static bool _lastElevated;
+
+        /// <summary>
+        /// Активное окно запущено с правами выше наших: макросы его не видят.
+        /// Считается вместе с CurrentFile и только при смене окна.
+        /// </summary>
+        public static bool CurrentAboveUs
+        {
+            get { CurrentFile(); return _lastElevated; }
+        }
 
         /// <summary>Имя exe активного окна («aion.bin») или null.</summary>
         public static string CurrentFile()
@@ -29,6 +39,7 @@ namespace MacroKit
 
             _lastHwnd = hwnd;
             _lastFile = ProcessFile(pid);
+            _lastElevated = !Elevation.IsElevated && Elevation.IsProcessElevated(pid) == true;
             return _lastFile;
         }
 

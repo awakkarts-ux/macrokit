@@ -78,6 +78,26 @@ namespace MacroKit
             }
         }
 
+        /// <summary>
+        /// Только флаг «запускаться от администратора» — его надо знать до
+        /// открытия окна, а полная загрузка с миграциями и предупреждениями
+        /// делается позже. Любая ошибка — значение по умолчанию.
+        /// </summary>
+        public static bool PeekRunAsAdmin()
+        {
+            try
+            {
+                if (!File.Exists(FilePath)) return true;
+                var root = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }
+                    .DeserializeObject(File.ReadAllText(FilePath, Encoding.UTF8)) as Dictionary<string, object>;
+                return root == null || B(root, "runAsAdmin", true);
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
         /// <summary>Копия нечитаемого конфига рядом с ним. null — не получилось.</summary>
         static string KeepBroken()
         {
@@ -99,6 +119,7 @@ namespace MacroKit
             cfg.EngineEnabled = B(root, "engineEnabled", true);
             cfg.ChatLogPath = S(root, "chatLogPath", cfg.ChatLogPath);
             cfg.OnlyInGame = B(root, "onlyInGame", false);
+            cfg.RunAsAdmin = B(root, "runAsAdmin", true);
             cfg.GameProcess = S(root, "gameProcess", cfg.GameProcess);
             cfg.ChatPause = B(root, "chatPause", false);
             cfg.ToggleVk = I(root, "toggleVk", cfg.ToggleVk);
@@ -286,6 +307,7 @@ namespace MacroKit
             sb.Append("  \"engineEnabled\": ").Append(cfg.EngineEnabled ? "true" : "false").Append(",\n");
             sb.Append("  \"activeProfile\": ").Append(Q(cfg.Active.Id)).Append(",\n");
             sb.Append("  \"chatLogPath\": ").Append(Q(cfg.ChatLogPath)).Append(",\n");
+            sb.Append("  \"runAsAdmin\": ").Append(cfg.RunAsAdmin ? "true" : "false").Append(",\n");
             sb.Append("  \"onlyInGame\": ").Append(cfg.OnlyInGame ? "true" : "false").Append(",\n");
             sb.Append("  \"gameProcess\": ").Append(Q(cfg.GameProcess)).Append(",\n");
             sb.Append("  \"chatPause\": ").Append(cfg.ChatPause ? "true" : "false").Append(",\n");

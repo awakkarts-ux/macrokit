@@ -20,7 +20,7 @@ namespace MacroKit.Ui
         readonly AppConfig _cfg;
         readonly MacroEngine _engine;
 
-        Check _chkOnlyGame, _chkChat, _chkJournal;
+        Check _chkOnlyGame, _chkChat, _chkJournal, _chkAdmin;
         Field _proc;
         Btn _pickProc, _toggleBtn, _toggleClear, _updBtn;
         NumField _fps;
@@ -30,6 +30,9 @@ namespace MacroKit.Ui
         UpdateInfo _update;
         bool _busy;
 
+        /// <summary>Нажата «Перезапустить от администратора» — главное окно перезапускает программу.</summary>
+        public bool RestartElevated { get; private set; }
+
         /// <summary>Установщик запущен — программу надо закрыть.</summary>
         public bool QuitForUpdate { get; private set; }
 
@@ -37,7 +40,7 @@ namespace MacroKit.Ui
         public UpdateInfo FoundUpdate { get { return _update; } }
 
         public SettingsDialog(AppConfig cfg, MacroEngine engine, UpdateInfo knownUpdate)
-            : base("Настройки", 640, 640)
+            : base("Настройки", 640, 692)
         {
             _cfg = cfg;
             _engine = engine;
@@ -58,6 +61,31 @@ namespace MacroKit.Ui
             int y = 24;
             const int h = Theme.ControlHeight;
             int right = ClientSize.Width - 24;
+
+            // ---- права ----
+            _chkAdmin = new Check { Text = "Запускать от администратора", Checked = _cfg.RunAsAdmin };
+            _chkAdmin.Bounds = new Rectangle(24, y + 14, _chkAdmin.FitWidth(), 24);
+            Controls.Add(_chkAdmin);
+
+            if (Elevation.IsElevated)
+            {
+                AddHint("сейчас запущена с правами", _chkAdmin.Right + 16, y, right - _chkAdmin.Right - 16, h);
+            }
+            else
+            {
+                var restart = new Btn { Text = "Перезапустить от администратора", Kind = Btn.Look.Primary };
+                restart.Width = restart.FitWidth();
+                restart.Location = new Point(right - restart.Width, y);
+                restart.Click += (s, e) =>
+                {
+                    ApplyValues();
+                    RestartElevated = true;
+                    DialogResult = DialogResult.OK;
+                    Close();
+                };
+                Controls.Add(restart);
+            }
+            y += h + 20;
 
             // ---- где работают макросы ----
             _chkOnlyGame = new Check { Text = "Только когда активно окно игры", Checked = _cfg.OnlyInGame };
@@ -191,6 +219,7 @@ namespace MacroKit.Ui
 
         void ApplyValues()
         {
+            _cfg.RunAsAdmin = _chkAdmin.Checked;
             _cfg.OnlyInGame = _chkOnlyGame.Checked;
             string proc = _proc.Box.Text.Trim();
             if (proc.Length > 0) _cfg.GameProcess = proc;

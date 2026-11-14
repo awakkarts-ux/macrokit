@@ -24,6 +24,10 @@ namespace MacroKit.Ui
         RailButton _settingsBtn;
         UpdateInfo _update;
 
+        // Активное окно выше нас по правам (игра от администратора, мы — нет):
+        // Windows не пускает к нему ни хук, ни SendInput
+        bool _foregroundAboveUs;
+
         // --- левая панель профилей ---
         RoundPanel _rail;
         readonly List<RailButton> _profileButtons = new List<RailButton>();
@@ -688,6 +692,13 @@ namespace MacroKit.Ui
                     ForegroundApp.Matches(ForegroundApp.CurrentFile(), _cfg.GameProcess);
                 _engine.SetGameActive(active);
 
+                bool above = ForegroundApp.CurrentAboveUs;
+                if (above != _foregroundAboveUs)
+                {
+                    _foregroundAboveUs = above;
+                    UpdateStatus();
+                }
+
                 // Движок переключили клавишей — подтягиваем переключатель и конфиг
                 if (_engineToggle.Checked != _engine.Enabled)
                 {
@@ -699,7 +710,8 @@ namespace MacroKit.Ui
                     SaveOnly();
                 }
 
-                if (++_watchTicks % 8 == 0 && _engine.CheckHook()) UpdateStatus();
+                // Окно выше по правам не пропускает зонд — хук тут ни при чём
+                if (++_watchTicks % 8 == 0 && !_foregroundAboveUs && _engine.CheckHook()) UpdateStatus();
             }
             catch (Exception ex)
             {
@@ -721,6 +733,13 @@ namespace MacroKit.Ui
                 {
                     ApplyAndSave();
                     UpdateStatus();
+                }
+
+                if (dlg.RestartElevated)
+                {
+                    SaveOnly();
+                    if (Elevation.RelaunchElevated()) Close();
+                    return;
                 }
 
                 // Установщик уже запущен: закрываемся, он заменит файлы и
@@ -1476,6 +1495,17 @@ namespace MacroKit.Ui
                     ? "Движок выключен · " + KeyNames.Get(_cfg.ToggleVk)
                     : "Движок выключен";
                 _statusLabel.ForeColor = Theme.TextFaint;
+                return;
+            }
+
+            if (_foregroundAboveUs)
+            {
+                _statusLabel.Text = "Игра от админа — нужны права";
+                _statusLabel.ForeColor = Theme.Red;
+                _tips.SetToolTip(_statusLabel,
+                    "Активное окно запущено от администратора, а MacroKit — нет.\n" +
+                    "Windows не пускает к такому окну ни нажатия, ни макросы.\n" +
+                    "Шестерёнка → «Перезапустить от администратора».");
                 return;
             }
 

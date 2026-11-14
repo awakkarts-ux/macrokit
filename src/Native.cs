@@ -191,6 +191,17 @@ namespace MacroKit
         public static extern bool QueryFullProcessImageName(IntPtr hProcess, uint flags,
             System.Text.StringBuilder exeName, ref uint size);
 
+        // ---------- Права процесса ----------
+
+        public const uint TOKEN_QUERY = 0x0008;
+        public const int TokenElevation = 20;
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        public static extern bool GetTokenInformation(IntPtr token, int infoClass, out int info, int length, out int returned);
+
         // ---------- Последний ввод в системе ----------
 
         [StructLayout(LayoutKind.Sequential)]
