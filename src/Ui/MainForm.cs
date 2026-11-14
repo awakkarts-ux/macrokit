@@ -57,7 +57,7 @@ namespace MacroKit.Ui
         Combo _cbRepeat, _cbRetrigger;
         NumField _numCount, _numGap;
         Label _lblCount, _lblGap, _lblRetrigger, _lblEstimate;
-        Btn _btnAddKey, _btnAddDelay, _btnAddMouse, _btnAddSlide, _btnRecord;
+        Btn _btnAddKey, _btnAddDelay, _btnAddMouse, _btnAddSlide, _btnAddSeries, _btnRecord;
         Btn _btnUp, _btnDown, _btnEditAction, _btnDelAction;
 
         int _selectedAction = -1;
@@ -588,6 +588,9 @@ namespace MacroKit.Ui
             _btnAddSlide = new Btn { Text = "+ Слайд", Kind = Btn.Look.Secondary };
             _btnAddSlide.Click += (s, e) => AddAction(ActionKind.Slide);
 
+            _btnAddSeries = new Btn { Text = "+ Серия", Kind = Btn.Look.Secondary };
+            _btnAddSeries.Click += (s, e) => AddAction(ActionKind.Series);
+
             _btnRecord = new Btn { Text = "Стоп · Esc", Kind = Btn.Look.Ghost };
             int recordWidth = _btnRecord.FitWidth();
             _btnRecord.Text = "Записать";
@@ -595,7 +598,7 @@ namespace MacroKit.Ui
             _btnRecord.Click += (s, e) => ToggleRecording();
 
             int x = 0;
-            foreach (var b in new[] { _btnAddKey, _btnAddDelay, _btnAddMouse, _btnAddSlide, _btnRecord })
+            foreach (var b in new[] { _btnAddKey, _btnAddDelay, _btnAddMouse, _btnAddSlide, _btnAddSeries, _btnRecord })
             {
                 if (b != _btnRecord) b.Width = b.FitWidth();
                 b.Location = new Point(x, row2);
@@ -1033,7 +1036,7 @@ namespace MacroKit.Ui
                 // У слайда удержание скилла 0: проверено в бою — 15 мс дают заметно
                 // больше промахов, а пауза на каст отсчитывается от отпускания
                 // скилла, так что лишнее удержание ещё и сдвигает бег с прыжком
-                Ms = kind == ActionKind.Delay ? 100 : (kind == ActionKind.Slide ? 0 : 30)
+                Ms = kind == ActionKind.Delay ? 100 : (kind == ActionKind.Slide ? 0 : kind == ActionKind.Series ? 10 : 30)
             };
 
             // Новый слайд — сразу с настройками, проверенными в бою (14.11):
@@ -1082,6 +1085,12 @@ namespace MacroKit.Ui
             if (a.Kind == ActionKind.Slide)
             {
                 using (var dlg = new SlideDialog(a, _engine, _cfg.GameFps))
+                    return dlg.ShowDialog(this) == DialogResult.OK;
+            }
+
+            if (a.Kind == ActionKind.Series)
+            {
+                using (var dlg = new SeriesDialog(a, _engine, _cfg))
                     return dlg.ShowDialog(this) == DialogResult.OK;
             }
 

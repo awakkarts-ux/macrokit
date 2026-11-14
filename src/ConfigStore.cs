@@ -177,6 +177,53 @@ namespace MacroKit
         /// </summary>
         internal static void Migrate(AppConfig cfg)
         {
+            MigrateHeldMove(cfg);
+            MigrateSeries(cfg);
+        }
+
+        public const string MigrationSeries = "series-profile";
+
+        /// <summary>
+        /// Появились серии умений. По договорённости рабочие профили не трогаем:
+        /// рядом с активным появляется его копия «… · серия» с готовой серией
+        /// лучника. У макроса нет клавиши-триггера — пока её не назначить, он
+        /// ничего не делает. Активным остаётся прежний профиль.
+        /// </summary>
+        static void MigrateSeries(AppConfig cfg)
+        {
+            if (cfg.Migrations.Contains(MigrationSeries)) return;
+
+            var active = cfg.Active;
+            var copy = active.Clone();
+            copy.Name = active.Name + " · серия";
+            copy.Macros.Add(RangerSeries());
+            cfg.Profiles.Insert(cfg.Profiles.IndexOf(active) + 1, copy);
+
+            cfg.Migrations.Add(MigrationSeries);
+        }
+
+        /// <summary>Серия лучника из разговора 14.11: 3 (и его продолжение), Alt+E, Alt+Q.</summary>
+        public static MacroDef RangerSeries()
+        {
+            var m = new MacroDef
+            {
+                Name = "Серия · 3 · Alt+E · Alt+Q",
+                Enabled = true,
+                TriggerVk = 0,
+                Suppress = true,
+                Repeat = RepeatMode.WhileHeld
+            };
+            var a = new MacroAction { Kind = ActionKind.Series, Ms = 10, SeriesUseLog = true, ChainWindowMs = 5000 };
+            a.Series.Add(new SeriesSkill { Name = "Внезапный выстрел", Vk = 0x33, CooldownMs = 12000 });
+            a.Series.Add(new SeriesSkill { Name = "Взрывной выстрел", Vk = 0x33, CooldownMs = 24000, Chain = true });
+            a.Series.Add(new SeriesSkill { Name = "Точный выстрел", Vk = 0x45, Alt = true, CooldownMs = 180000 });
+            a.Series.Add(new SeriesSkill { Name = "Стрела грифона", Vk = 0x51, Alt = true, CooldownMs = 60000 });
+            m.Actions.Add(a);
+            return m;
+        }
+
+        static void MigrateHeldMove(AppConfig cfg)
+        {
             if (cfg.Migrations.Contains(MigrationHeldMove)) return;
 
             foreach (var p in cfg.Profiles.ToArray())
@@ -258,7 +305,7 @@ namespace MacroKit
                     {
                         var ad = item as Dictionary<string, object>;
                         if (ad == null) continue;
-                        m.Actions.Add(new MacroAction
+                        var act = new MacroAction
                         {
                             Kind = E(ad, "kind", ActionKind.KeyPress),
                             Vk = I(ad, "vk", 0),
@@ -285,13 +332,40 @@ namespace MacroKit
                             TapGapMs = Math.Max(0, I(ad, "tapGapMs", 40)),
                             JumpVk = I(ad, "jumpVk", 0x20),
                             // нет поля — слайд из старого конфига, поведение прежнее
-                            RespectHeldMove = B(ad, "respectHeldMove", false)
-                        });
+                            RespectHeldMove = B(ad, "respectHeldMove", false),
+                            SeriesUseLog = B(ad, "useLog", true),
+                            ChainWindowMs = Math.Max(0, I(ad, "chainWindowMs", 5000))
+                        };
+                        ReadSeries(ad, act.Series);
+                        m.Actions.Add(act);
                     }
                 }
             }
 
             return m;
+        }
+
+        static void ReadSeries(Dictionary<string, object> ad, List<SeriesSkill> into)
+        {
+            object raw;
+            if (!ad.TryGetValue("series", out raw) || !(raw is object[])) return;
+
+            foreach (var item in (object[])raw)
+            {
+                var d = item as Dictionary<string, object>;
+                if (d == null) continue;
+                into.Add(new SeriesSkill
+                {
+                    Name = S(d, "name", ""),
+                    Vk = I(d, "vk", 0),
+                    Ctrl = B(d, "ctrl", false),
+                    Alt = B(d, "alt", false),
+                    Shift = B(d, "shift", false),
+                    CooldownMs = Math.Max(0, I(d, "cdMs", 10000)),
+                    WaitMs = Math.Max(0, I(d, "waitMs", 1000)),
+                    Chain = B(d, "chain", false)
+                });
+            }
         }
 
         // ---------- запись ----------
@@ -461,6 +535,28 @@ namespace MacroKit
                     if (a.IsMouse) sb.Append(", \"button\": ").Append(Q(a.Button.ToString()));
                     sb.Append(", \"ms\": ").Append(a.Ms);
                     if (a.Kind == ActionKind.WaitLog) sb.Append(", \"pattern\": ").Append(Q(a.Pattern));
+
+                    if (a.Kind == ActionKind.Series)
+                    {
+                        sb.Append(", \"useLog\": ").Append(a.SeriesUseLog ? "true" : "false");
+                        sb.Append(", \"chainWindowMs\": ").Append(a.ChainWindowMs);
+                        sb.Append(", \"series\": [");
+                        for (int j = 0; j < a.Series.Count; j++)
+                        {
+                            var x = a.Series[j];
+                            if (j > 0) sb.Append(',');
+                            sb.Append("\n              { \"name\": ").Append(Q(x.Name));
+                            sb.Append(", \"vk\": ").Append(x.Vk);
+                            if (x.Ctrl) sb.Append(", \"ctrl\": true");
+                            if (x.Alt) sb.Append(", \"alt\": true");
+                            if (x.Shift) sb.Append(", \"shift\": true");
+                            sb.Append(", \"cdMs\": ").Append(x.CooldownMs);
+                            sb.Append(", \"waitMs\": ").Append(x.WaitMs);
+                            if (x.Chain) sb.Append(", \"chain\": true");
+                            sb.Append(" }");
+                        }
+                        sb.Append(a.Series.Count > 0 ? "\n            ]" : "]");
+                    }
 
                     if (a.IsSlide)
                     {

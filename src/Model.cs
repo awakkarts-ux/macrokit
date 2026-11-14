@@ -15,7 +15,62 @@ namespace MacroKit
         MouseDown,
         MouseUp,
         Slide,      // скилл + отмена анимации бегом с прыжком, см. MacroAction
-        WaitLog     // ждать строку в Chat.log игры, см. ChatLog; Ms — сколько ждать максимум
+        WaitLog,    // ждать строку в Chat.log игры, см. ChatLog; Ms — сколько ждать максимум
+        Series      // серия умений: следующее не в кд, см. SeriesSkill и SkillTimers
+    }
+
+    /// <summary>
+    /// Одно умение серии.
+    ///
+    /// Серия за проход нажимает следующее по кругу умение, которое не в кд, а
+    /// умения в кд пропускает — как серии в 5.x. Что умение ушло в кд, программа
+    /// узнаёт из Chat.log (строка с его названием), а не по факту нажатия: в
+    /// стане или вне дистанции нажатие есть, а скилла нет.
+    /// </summary>
+    public sealed class SeriesSkill
+    {
+        /// <summary>Название как в Chat.log — по нему ищется строка о применении.</summary>
+        public string Name = "";
+
+        public int Vk;
+        public bool Ctrl, Alt, Shift;
+
+        /// <summary>Перезарядка умения.</summary>
+        public int CooldownMs = 10000;
+
+        /// <summary>
+        /// Сколько ждать после нажатия. С Chat.log — строку о применении (для
+        /// кастуемых — время каста с запасом); без лога — просто пауза.
+        /// </summary>
+        public int WaitMs = 1000;
+
+        /// <summary>
+        /// Продолжение предыдущего умения на той же клавише (цепочка в игре):
+        /// доступно только какое-то время после того, как прошло предыдущее.
+        /// </summary>
+        public bool Chain;
+
+        public SeriesSkill Clone()
+        {
+            return new SeriesSkill
+            {
+                Name = Name, Vk = Vk, Ctrl = Ctrl, Alt = Alt, Shift = Shift,
+                CooldownMs = CooldownMs, WaitMs = WaitMs, Chain = Chain
+            };
+        }
+
+        public string KeyText
+        {
+            get
+            {
+                var sb = new StringBuilder();
+                if (Ctrl) sb.Append("Ctrl + ");
+                if (Alt) sb.Append("Alt + ");
+                if (Shift) sb.Append("Shift + ");
+                sb.Append(KeyNames.Get(Vk));
+                return sb.ToString();
+            }
+        }
     }
 
     public enum MouseBtn { Left, Right, Middle, X1, X2 }
@@ -151,6 +206,17 @@ namespace MacroKit
         /// <summary>Пауза между нажатиями скилла, если их несколько.</summary>
         public int TapGapMs = 40;
 
+        // ---- параметры Series ----
+
+        /// <summary>Умения серии по порядку.</summary>
+        public List<SeriesSkill> Series = new List<SeriesSkill>();
+
+        /// <summary>Подтверждать применение строкой в Chat.log. Выключено — считать нажатие применением.</summary>
+        public bool SeriesUseLog = true;
+
+        /// <summary>Сколько после умения доступно его продолжение (SeriesSkill.Chain).</summary>
+        public int ChainWindowMs = 5000;
+
         int ExtraTapsMs { get { return Math.Max(0, SkillTaps - 1) * (TapGapMs + Ms); } }
 
         public MacroAction Clone()
@@ -163,7 +229,9 @@ namespace MacroKit
                 Jump = Jump, JumpAfterMs = JumpAfterMs, FreeMods = FreeMods,
                 Mode = Mode, AutoVk = AutoVk, ApexMs = ApexMs, AutoGapMs = AutoGapMs, LandMs = LandMs,
                 SkillTaps = SkillTaps, TapGapMs = TapGapMs,
-                JumpVk = JumpVk, RespectHeldMove = RespectHeldMove
+                JumpVk = JumpVk, RespectHeldMove = RespectHeldMove,
+                Series = Series.ConvertAll(x => x.Clone()),
+                SeriesUseLog = SeriesUseLog, ChainWindowMs = ChainWindowMs
             };
         }
 
@@ -201,6 +269,7 @@ namespace MacroKit
                 if (IsSlide) return ((char)0xE72A).ToString();   // стрелка вперёд
                 if (Kind == ActionKind.Delay) return "\uE916";   // секундомер
                 if (Kind == ActionKind.WaitLog) return "\uE8BD"; // сообщение
+                if (Kind == ActionKind.Series) return "\uE8CB"; // сортировка — очередь умений
                 if (IsMouse) return "\uE962";                    // мышь
                 return "\uE765";                                 // клавиатура
             }
@@ -212,6 +281,7 @@ namespace MacroKit
             {
                 if (Kind == ActionKind.Delay) return "Пауза";
                 if (Kind == ActionKind.WaitLog) return "Ждать строку в логе";
+                if (Kind == ActionKind.Series) return "Серия · " + Series.Count + " " + Plural(Series.Count, "умение", "умения", "умений");
                 if (IsSlide) return (Mode == SlideMode.Air ? "Слайд в прыжке · " : "Слайд · ")
                                   + (SkillTaps > 1 ? SkillTaps + "× " : "") + SkillText;
                 if (IsMouse) return "Мышь · " + MouseName(Button);
@@ -227,6 +297,13 @@ namespace MacroKit
                 {
                     case ActionKind.Delay: return Ms + " мс";
                     case ActionKind.WaitLog: return "«" + Pattern + "» · не дольше " + Ms + " мс";
+                    case ActionKind.Series:
+                    {
+                        var names = new List<string>();
+                        foreach (var x in Series)
+                            names.Add((string.IsNullOrEmpty(x.Name) ? x.KeyText : x.Name) + " " + SecText(x.CooldownMs));
+                        return string.Join(" → ", names.ToArray()) + (SeriesUseLog ? "" : "   · без Chat.log");
+                    }
                     case ActionKind.KeyPress: return "нажать · удержание " + Ms + " мс";
                     case ActionKind.KeyDown: return "зажать";
                     case ActionKind.KeyUp: return "отпустить";
@@ -259,6 +336,22 @@ namespace MacroKit
                     return PreRunMs + JumpHoldMs + ApexMs + (AutoVk != 0 ? AutoGapMs : 0) + Ms + ExtraTapsMs + LandMs + RunMs;
                 return PreRunMs + (AutoVk != 0 ? AutoGapMs : 0) + Ms + ExtraTapsMs + CastMs + RunMs;
             }
+        }
+
+        /// <summary>Кд для подписи: «12 с», «3 мин», «1,5 с».</summary>
+        public static string SecText(int ms)
+        {
+            if (ms >= 60000 && ms % 60000 == 0) return (ms / 60000) + " мин";
+            if (ms % 1000 == 0) return (ms / 1000) + " с";
+            return (ms / 1000.0).ToString("0.#", System.Globalization.CultureInfo.GetCultureInfo("ru-RU")) + " с";
+        }
+
+        static string Plural(int n, string one, string few, string many)
+        {
+            int d = n % 10, h = n % 100;
+            if (d == 1 && h != 11) return one;
+            if (d >= 2 && d <= 4 && (h < 12 || h > 14)) return few;
+            return many;
         }
 
         public static string MouseName(MouseBtn b)

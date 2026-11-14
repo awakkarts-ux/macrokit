@@ -68,6 +68,11 @@ namespace MacroKit
         // Alt-скиллом бежал бы на 40 мс позже обычного.
         int _skillTail;
 
+        // Серия: с какого умения искать следующее доступное. Между нажатиями не
+        // сбрасывается: серию жмут частыми нажатиями, и каждое — отдельный
+        // запуск; со сбросом она жала бы всегда первое доступное, а не по кругу.
+        int _seriesPos;
+
         /// <summary>Есть ли в макросе слайд: такие играют строго по одному.</summary>
         public bool HasSlide { get; private set; }
 
@@ -327,6 +332,10 @@ namespace MacroKit
 
                     case ActionKind.WaitLog:
                         if (!WaitLog(a)) return false;
+                        break;
+
+                    case ActionKind.Series:
+                        if (!PlaySeriesStep(a)) return false;
                         break;
                 }
             }
@@ -650,6 +659,115 @@ namespace MacroKit
             ChatLog.Journal(_def.Name + ": " + (_stop.WaitOne(0) ? "прервано" : "не дождались за " + a.Ms + " мс") + ", слайда не было");
             if (_stopReason == null) _stopReason = "нет строки в логе за " + a.Ms + " мс";
             return false;
+        }
+
+        /// <summary>Пауза прохода, когда в серии всё в кд: иначе «пока держу» крутился бы вхолостую.</summary>
+        public const int SeriesIdleMs = 15;
+
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Text.RegularExpressions.Regex> ConfirmPatterns =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, System.Text.RegularExpressions.Regex>();
+
+        /// <summary>Строка «умение прошло» или «не прошло» — чем раньше придёт любая.</summary>
+        static System.Text.RegularExpressions.Regex ConfirmPattern(string name)
+        {
+            return ConfirmPatterns.GetOrAdd(name, n => new System.Text.RegularExpressions.Regex(
+                "(" + SkillTimers.PatternFor(n) + ")|(" + SkillTimers.Failure + ")",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+        }
+
+        /// <summary>Ключ учёта кд. У умения без названия — свой на каждый шаг макроса.</summary>
+        string SeriesKey(MacroAction a, int i)
+        {
+            var s = a.Series[i];
+            string k = SkillTimers.KeyOf(s.Name);
+            return k.Length > 0 ? k : "#" + _def.Id + ":" + _def.Actions.IndexOf(a) + ":" + i;
+        }
+
+        /// <summary>
+        /// Можно ли сейчас жать умение серии. Кд считается от строки в
+        /// Chat.log (или от нажатия, если лог выключен). Продолжение (Chain)
+        /// ещё и живёт только ChainWindowMs после предыдущего умения и один
+        /// раз на каждое его применение.
+        /// </summary>
+        bool SeriesReady(MacroAction a, int i, long now)
+        {
+            var s = a.Series[i];
+            if (s.Vk == 0) return false;
+
+            long last = SkillTimers.LastSeen(SeriesKey(a, i));
+            if (last >= 0 && now - last < s.CooldownMs) return false;
+
+            if (s.Chain && i > 0)
+            {
+                long parent = SkillTimers.LastSeen(SeriesKey(a, i - 1));
+                if (parent < 0 || now - parent > a.ChainWindowMs) return false;
+                if (last >= parent) return false;   // после этого применения уже было
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Один проход серии: следующее по кругу умение не в кд. Прошло (есть
+        /// строка в логе) — дальше ищем со следующего; не прошло (стан, далеко,
+        /// не дождались) — на следующем проходе пробуем его же. Всё в кд —
+        /// ничего не жмём.
+        /// </summary>
+        bool PlaySeriesStep(MacroAction a)
+        {
+            int n = a.Series.Count;
+            long now = SkillTimers.Now;
+
+            int pick = -1;
+            for (int k = 0; k < n; k++)
+            {
+                int i = (_seriesPos + k) % n;
+                if (SeriesReady(a, i, now)) { pick = i; break; }
+            }
+            if (pick < 0) return _waiter.Wait(SeriesIdleMs);
+
+            var s = a.Series[pick];
+            string key = SeriesKey(a, pick);
+            var log = a.SeriesUseLog && s.Name.Trim().Length > 0 ? ChatLog.Current : null;
+
+            var press = new MacroAction { Vk = s.Vk, SkillCtrl = s.Ctrl, SkillAlt = s.Alt, SkillShift = s.Shift, Ms = a.Ms };
+
+            if (log == null)
+            {
+                long at = SkillTimers.Now;
+                if (!PressSkill(press)) return false;
+                SkillTimers.Mark(key, at);
+                _seriesPos = (pick + 1) % n;
+                SeriesJournal(s, "нажато (без лога)");
+                return s.WaitMs <= 0 || _waiter.Wait(s.WaitMs);
+            }
+
+            using (var expect = log.Expect(ConfirmPattern(s.Name)))
+            {
+                var clock = Stopwatch.StartNew();
+                if (!PressSkill(press)) return false;
+
+                string hit = log.Wait(expect, Math.Max(1, s.WaitMs), _stop);
+                if (_stop.WaitOne(0)) return false;
+
+                double ms = clock.Elapsed.TotalMilliseconds;
+                if (hit != null && !SkillTimers.Failure.IsMatch(hit))
+                {
+                    _seriesPos = (pick + 1) % n;
+                    SeriesJournal(s, "прошло через " + ms.ToString("F0") + " мс");
+                }
+                else
+                {
+                    _seriesPos = pick;
+                    SeriesJournal(s, hit != null ? "не прошло: " + hit : "нет строки за " + s.WaitMs + " мс, повторю");
+                }
+            }
+            return true;
+        }
+
+        void SeriesJournal(SeriesSkill s, string what)
+        {
+            if (!JournalOn) return;
+            ChatLog.Journal(_def.Name + ": серия — " + (s.Name.Length > 0 ? s.Name : s.KeyText) + " (" + s.KeyText + "): " + what);
         }
 
         /// <summary>
@@ -1094,8 +1212,21 @@ namespace MacroKit
 
             // Лог читаем, только пока он нужен хоть одному включённому макросу
             bool needLog = false;
+            var skillNames = new List<string>();
             foreach (var def in cfg.Macros)
-                if (def.Enabled && def.Actions.Exists(a => a.Kind == ActionKind.WaitLog)) needLog = true;
+            {
+                if (!def.Enabled) continue;
+                foreach (var a in def.Actions)
+                {
+                    if (a.Kind == ActionKind.WaitLog) needLog = true;
+                    if (a.Kind == ActionKind.Series && a.SeriesUseLog)
+                    {
+                        needLog = true;
+                        foreach (var s in a.Series) skillNames.Add(s.Name);
+                    }
+                }
+            }
+            SkillTimers.WatchNames(skillNames);
             ChatLog.Use(needLog ? cfg.ChatLogPath : null);
 
             _toggleVk = cfg.ToggleVk;

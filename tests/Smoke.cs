@@ -90,6 +90,7 @@ namespace MacroKit.Tests
                 TestMigrationAndInitials();
                 TestJournal();
                 TestModifierTriggers();
+                TestSeries();
             }
             finally
             {
@@ -803,6 +804,7 @@ namespace MacroKit.Tests
             cfg.Profiles.Add(p);
             cfg.Profiles.Add(plain);
             cfg.ActiveProfileId = p.Id;
+            cfg.Migrations.Add(ConfigStore.MigrationSeries);   // серии проверяются отдельно, в TestSeries
 
             ConfigStore.Migrate(cfg);
 
@@ -1005,6 +1007,310 @@ namespace MacroKit.Tests
         static string Last(List<string> lines)
         {
             lock (lines) return lines.Count == 0 ? "(пусто)" : lines[lines.Count - 1];
+        }
+
+        // ---------- серия умений ----------
+
+        /// <summary>
+        /// «Игра» для серии: смотрит на нажатия, которые макрос отправил, и через
+        /// 30 мс дописывает в Chat.log строку в настоящем формате — если умение
+        /// не в кд (по своим часам игры) и персонаж не в стане. Считает нажатия
+        /// впустую: в кд, мимо продолжения.
+        /// </summary>
+        sealed class FakeGame
+        {
+            public readonly string Path;
+            public volatile bool Stunned, TooFar;
+            public readonly List<string> Casts = new List<string>();
+            public int Wasted;
+
+            readonly Dictionary<string, long> _last = new Dictionary<string, long>();
+            readonly Dictionary<string, int> _cd;
+            readonly int _chainWindow;
+            readonly Stopwatch _clock = Stopwatch.StartNew();
+            readonly Thread _thread;
+            volatile bool _stop;
+            int _seen;
+            bool _alt;
+            long _baseAt = -1;
+            bool _chainUsed;
+
+            public FakeGame(string path, Dictionary<string, int> cd, int chainWindow)
+            {
+                Path = path;
+                _cd = cd;
+                _chainWindow = chainWindow;
+                lock (Gate) _seen = Log.Count;
+                _thread = new Thread(Loop) { IsBackground = true };
+                _thread.Start();
+            }
+
+            public void Write(string text)
+            {
+                System.IO.File.AppendAllText(Path, "2026.11.14 07:06:10 : " + text + " \r\n", System.Text.Encoding.GetEncoding(1251));
+            }
+
+            bool Ready(string name, long now)
+            {
+                long t;
+                return !_last.TryGetValue(name, out t) || now - t >= _cd[name];
+            }
+
+            void Cast(string name, string line, long now)
+            {
+                _last[name] = now;
+                lock (Casts) Casts.Add(name);
+                Thread.Sleep(30);
+                Write(line);
+                if (name == "Внезапный выстрел") Write("Критический удар! Внезапный выстрел IV: Тренировочная кукла оглушается.");
+            }
+
+            void Press(int vk)
+            {
+                long now = _clock.ElapsedMilliseconds;
+                if (Stunned) return;
+                if (TooFar) { Thread.Sleep(30); Write("Цель находится слишком далеко."); return; }
+
+                if (vk == 0x33 && !_alt)
+                {
+                    bool chainUp = _baseAt >= 0 && !_chainUsed && now - _baseAt <= _chainWindow;
+                    if (chainUp && Ready("Взрывной выстрел", now))
+                    {
+                        _chainUsed = true;
+                        Cast("Взрывной выстрел", "Взрывной выстрел III: Тренировочная кукла получает 1 361 ед. урона.", now);
+                    }
+                    else if (!chainUp && Ready("Внезапный выстрел", now))
+                    {
+                        _baseAt = now;
+                        _chainUsed = false;
+                        Cast("Внезапный выстрел", "Внезапный выстрел IV: Тренировочная кукла получает 3 369 ед. урона.", now);
+                    }
+                    else Wasted++;
+                }
+                else if (vk == 0x45 && _alt)
+                {
+                    if (Ready("Точный выстрел", now)) Cast("Точный выстрел", "Критический удар! Точный выстрел I: Тренировочная кукла получает 3 637 ед. урона.", now);
+                    else Wasted++;
+                }
+                else if (vk == 0x51 && _alt)
+                {
+                    if (Ready("Стрела грифона", now)) Cast("Стрела грифона", "Критический удар! Стрела грифона I: Тренировочная кукла получает 3 270 ед. урона.", now);
+                    else Wasted++;
+                }
+                else Wasted++;
+            }
+
+            void Loop()
+            {
+                while (!_stop)
+                {
+                    Ev e = null;
+                    lock (Gate) if (_seen < Log.Count) e = Log[_seen++];
+                    if (e == null) { Thread.Sleep(1); continue; }
+                    if (e.Vk == 0x12) { _alt = e.Down; continue; }
+                    if (e.Down) Press(e.Vk);
+                }
+            }
+
+            public string CastsText()
+            {
+                lock (Casts) return string.Join(" → ", Casts.ToArray());
+            }
+
+            public void Stop() { _stop = true; _thread.Join(500); }
+        }
+
+        static MacroDef SeriesMacro(bool useLog)
+        {
+            var def = new MacroDef { Name = "серия", Repeat = RepeatMode.Once, OnRetrigger = Retrigger.Ignore, TriggerVk = 0x5A };
+            var a = new MacroAction { Kind = ActionKind.Series, Ms = 0, SeriesUseLog = useLog, ChainWindowMs = 400 };
+            a.Series.Add(new SeriesSkill { Name = "Внезапный выстрел", Vk = 0x33, CooldownMs = 600, WaitMs = 300 });
+            a.Series.Add(new SeriesSkill { Name = "Взрывной выстрел", Vk = 0x33, CooldownMs = 1200, WaitMs = 300, Chain = true });
+            a.Series.Add(new SeriesSkill { Name = "Точный выстрел", Vk = 0x45, Alt = true, CooldownMs = 5000, WaitMs = 300 });
+            a.Series.Add(new SeriesSkill { Name = "Стрела грифона", Vk = 0x51, Alt = true, CooldownMs = 2500, WaitMs = 300 });
+            def.Actions.Add(a);
+            return def;
+        }
+
+        /// <summary>Частые нажатия кнопки серии, как пользователь жмёт её в бою.</summary>
+        static void Tap(MacroRunner r, int forMs)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < forMs)
+            {
+                r.Trigger();
+                Thread.Sleep(40);
+            }
+            WaitIdle(new[] { r }, 2000);
+        }
+
+        static void TestSeries()
+        {
+            Head("Серия умений: пропуск того, что в кд, по Chat.log");
+
+            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "mk-smoke-series");
+            System.IO.Directory.CreateDirectory(dir);
+            string path = System.IO.Path.Combine(dir, "Chat.log");
+            System.IO.File.WriteAllText(path, "", System.Text.Encoding.GetEncoding(1251));
+
+            var cds = new Dictionary<string, int>
+            {
+                { "Внезапный выстрел", 600 }, { "Взрывной выстрел", 1200 }, { "Точный выстрел", 5000 }, { "Стрела грифона", 2500 }
+            };
+
+            // шаблон по строкам из настоящего лога
+            bool m1 = SkillTimers.PatternFor("Стрела Грифона").IsMatch("2026.11.14 07:06:19 : Критический удар! Стрела грифона I: Тренировочная кукла получает 3 270 ед. урона. ");
+            Check("шаблон: крит, ранг, другой регистр", m1, "подходит", m1 ? "подходит" : "не подходит");
+            bool m2 = SkillTimers.PatternFor("Внезапный выстрел").IsMatch("2026.11.14 07:06:24 : [3.Поиск группы] [charname:Pozi]: Внезапный выстрел: ап");
+            Check("шаблон: упоминание в чате не считается", !m2, "не подходит", m2 ? "подходит" : "не подходит");
+            bool m3 = SkillTimers.PatternFor("Выстрел").IsMatch("2026.11.14 07:06:12 : Прицельный выстрел IV: Тренировочная кукла получает 1 025 ед. урона.");
+            Check("шаблон: другое умение не считается", !m3, "не подходит", m3 ? "подходит" : "не подходит");
+
+            ChatLog.JournalPath = System.IO.Path.Combine(dir, "timing.txt");
+            ChatLog.Use(path);
+            var def = SeriesMacro(true);
+            var names = new List<string>();
+            foreach (var x in def.Actions[0].Series) names.Add(x.Name);
+            SkillTimers.WatchNames(names);
+            Thread.Sleep(100);
+
+            try
+            {
+                // 1. Порядок и пропуск кд
+                SkillTimers.Clear();
+                ResetLog();
+                var game = new FakeGame(path, cds, 400);
+                var r = new MacroRunner(def);
+                Tap(r, 1800);
+                game.Stop();
+                string casts = game.CastsText();
+                Console.WriteLine("    прошло: " + casts);
+                Check("первый круг по порядку, с продолжением",
+                    casts.StartsWith("Внезапный выстрел → Взрывной выстрел → Точный выстрел → Стрела грифона"),
+                    "Внезапный → Взрывной → Точный → Грифон …", casts);
+                Check("умения в кд серия не жала", game.Wasted == 0, "0 нажатий впустую", game.Wasted + " впустую");
+                int sudden = 0, blast = 0, aimed = 0;
+                lock (game.Casts) foreach (var c in game.Casts) { if (c == "Внезапный выстрел") sudden++; if (c == "Взрывной выстрел") blast++; if (c == "Точный выстрел") aimed++; }
+                Check("Внезапный — снова, как только вышел кд", sudden >= 2, "≥ 2 раз за 1,8 с при кд 0,6", sudden + " раз");
+                Check("Точный с кд 5 с — один раз", aimed == 1, "1", aimed.ToString());
+                Check("продолжение не чаще своего кд", blast <= 2, "≤ 2", blast.ToString());
+                r.Dispose();
+
+                // 2. Стан: нажатие есть, строки нет — кд не засчитан, серия ждёт то же умение
+                SkillTimers.Clear();
+                ResetLog();
+                game = new FakeGame(path, cds, 400);
+                game.Stunned = true;
+                r = new MacroRunner(def);
+                var t = new Thread(() => { Thread.Sleep(700); game.Stunned = false; });
+                t.Start();
+                Tap(r, 1000);
+                t.Join();
+                game.Stop();
+                casts = game.CastsText();
+                Console.WriteLine("    после стана: " + casts);
+                Check("после стана первым идёт тот же Внезапный", casts.StartsWith("Внезапный выстрел"), "Внезапный выстрел …", casts);
+                r.Dispose();
+
+                // 3. «Цель находится слишком далеко» — ответ сразу, без ожидания 300 мс
+                SkillTimers.Clear();
+                ResetLog();
+                game = new FakeGame(path, cds, 400);
+                game.TooFar = true;
+                r = new MacroRunner(def);
+                var sw = Stopwatch.StartNew();
+                r.Trigger();
+                WaitIdle(new[] { r }, 2000);
+                double ms = sw.Elapsed.TotalMilliseconds;
+                game.Stop();
+                Check("«слишком далеко» обрывает ожидание", ms < 200, "< 200 мс", ms.ToString("F0") + " мс");
+                bool marked = SkillTimers.LastSeen(SkillTimers.KeyOf("Внезапный выстрел")) >= 0;
+                Check("и кд не засчитан", !marked, "не засчитан", marked ? "засчитан" : "не засчитан");
+                r.Dispose();
+
+                // 4. Умение, прожатое рукой, тоже уходит в кд
+                SkillTimers.Clear();
+                ResetLog();
+                game = new FakeGame(path, cds, 400);
+                game.Write("Критический удар! Точный выстрел I: Тренировочная кукла получает 3 637 ед. урона.");
+                Thread.Sleep(50);
+                r = new MacroRunner(def);
+                Tap(r, 700);
+                game.Stop();
+                casts = game.CastsText();
+                Check("Точный, прожатый рукой, серия пропускает", !casts.Contains("Точный выстрел"), "без Точного", casts);
+                r.Dispose();
+
+                // 5. Всё в кд — ничего не жмём
+                ResetLog();
+                long now = SkillTimers.Now;
+                foreach (var n in names) SkillTimers.Mark(SkillTimers.KeyOf(n), now);
+                r = new MacroRunner(def);
+                Tap(r, 200);
+                List<Ev> evs;
+                lock (Gate) evs = new List<Ev>(Log);
+                Check("всё в кд — ни одного нажатия", evs.Count == 0, "пусто", Describe(evs));
+                r.Dispose();
+            }
+            finally
+            {
+                ChatLog.Use(null);
+                SkillTimers.WatchNames(new string[0]);
+                SkillTimers.Clear();
+            }
+
+            // 6. Без лога: нажатие = применение, пауза после умения
+            SkillTimers.Clear();
+            ResetLog();
+            var r2 = new MacroRunner(SeriesMacro(false));
+            Tap(r2, 700);
+            List<Ev> ev2;
+            lock (Gate) ev2 = new List<Ev>(Log);
+            Check("без лога: нажатие засчитывается, дальше следующее", Describe(ev2).StartsWith("3↓ 3↑ 3↓ 3↑"), "3↓ 3↑ 3↓ 3↑ …", Describe(ev2));
+            r2.Dispose();
+            SkillTimers.Clear();
+
+            // 7. Миграция и конфиг
+            var cfg = new AppConfig();
+            cfg.Profiles.Add(new Profile { Name = "Лучник" });
+            cfg.ActiveProfileId = cfg.Profiles[0].Id;
+            cfg.Macros.Add(new MacroDef { Name = "спам", TriggerVk = 0x31 });
+            cfg.Migrations.Add(ConfigStore.MigrationHeldMove);
+            ConfigStore.Migrate(cfg);
+            Check("миграция: копия активного профиля «· серия»", cfg.Profiles.Count == 2 && cfg.Profiles[1].Name == "Лучник · серия", "Лучник · серия", cfg.Profiles.Count > 1 ? cfg.Profiles[1].Name : "нет");
+            bool okMig = cfg.Profiles.Count == 2 && cfg.Profiles[1].Macros.Count == 2 && cfg.Profiles[0].Macros.Count == 1 && cfg.Active == cfg.Profiles[0];
+            Check("в ней готовая серия, активный не тронут", okMig, "да", okMig ? "да" : "нет");
+            ConfigStore.Migrate(cfg);
+            Check("повторно не срабатывает", cfg.Profiles.Count == 2, "2 профиля", cfg.Profiles.Count + " профиля");
+
+            var ranger = ConfigStore.RangerSeries();
+            var back = LoadFromString(SaveToString(ranger));
+            var a2 = back.Profiles[0].Macros[0].Actions[0];
+            var s0 = ranger.Actions[0].Series;
+            bool same = a2.Kind == ActionKind.Series && a2.Series.Count == 4 && a2.ChainWindowMs == 5000 && a2.SeriesUseLog;
+            for (int i = 0; same && i < 4; i++)
+                same = a2.Series[i].Name == s0[i].Name && a2.Series[i].Vk == s0[i].Vk && a2.Series[i].Alt == s0[i].Alt
+                    && a2.Series[i].CooldownMs == s0[i].CooldownMs && a2.Series[i].Chain == s0[i].Chain && a2.Series[i].WaitMs == s0[i].WaitMs;
+            Check("сохранение и чтение без потерь", same, "то же самое", same ? "то же самое" : "отличается");
+            Check("подпись шага", ranger.Actions[0].Title == "Серия · 4 умения", "Серия · 4 умения", ranger.Actions[0].Title);
+            Console.WriteLine("    " + ranger.Actions[0].Detail);
+        }
+
+        static string SaveToString(MacroDef macro)
+        {
+            var m = typeof(ConfigStore).GetMethod("WriteMacro", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{ \"profiles\": [ { \"name\": \"x\", \"macros\": [\n");
+            m.Invoke(null, new object[] { sb, macro });
+            sb.Append("\n] } ] }");
+            return sb.ToString();
+        }
+
+        static AppConfig LoadFromString(string json)
+        {
+            var root = new System.Web.Script.Serialization.JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
+            var m = typeof(ConfigStore).GetMethod("Parse", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            return (AppConfig)m.Invoke(null, new object[] { root });
         }
 
         // ---------- инфраструктура ----------

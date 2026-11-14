@@ -23,7 +23,7 @@ namespace MacroKit
     /// </summary>
     public sealed class ChatLog : IDisposable
     {
-        sealed class Waiter
+        internal sealed class Waiter
         {
             public Regex Pattern;
             public long AfterLine;
@@ -70,10 +70,26 @@ namespace MacroKit
         }
 
         /// <summary>
-        /// Ждёт НОВУЮ строку, подходящую под шаблон. Возвращает её или null —
-        /// если вышло время или макрос остановили (cancel).
+        /// Ожидание строки, заведённое заранее — ДО нажатия, после которого она
+        /// придёт: так строка не проскочит между нажатием и началом ожидания.
         /// </summary>
-        public string WaitFor(Regex pattern, int timeoutMs, WaitHandle cancel)
+        public sealed class Expectation : IDisposable
+        {
+            internal Waiter W;
+            internal ChatLog Log;
+
+            public void Dispose()
+            {
+                var log = Log;
+                if (log == null) return;
+                Log = null;
+                lock (log._gate) log._waiters.Remove(W);
+                W.Done.Close();
+            }
+        }
+
+        /// <summary>Начать ждать НОВУЮ строку по шаблону.</summary>
+        public Expectation Expect(Regex pattern)
         {
             var w = new Waiter { Pattern = pattern };
             lock (_gate)
@@ -81,17 +97,25 @@ namespace MacroKit
                 w.AfterLine = _lines;
                 _waiters.Add(w);
             }
+            return new Expectation { W = w, Log = this };
+        }
 
-            try
-            {
-                WaitHandle.WaitAny(new[] { w.Done, cancel }, timeoutMs);
-                return w.Hit;
-            }
-            finally
-            {
-                lock (_gate) _waiters.Remove(w);
-                w.Done.Close();
-            }
+        /// <summary>Дождаться строки: она сама или null — вышло время или отмена (cancel).</summary>
+        public string Wait(Expectation e, int timeoutMs, WaitHandle cancel)
+        {
+            if (e.Log == null) return null;
+            WaitHandle.WaitAny(new[] { e.W.Done, cancel }, timeoutMs);
+            return e.W.Hit;
+        }
+
+        /// <summary>
+        /// Ждёт НОВУЮ строку, подходящую под шаблон. Возвращает её или null —
+        /// если вышло время или макрос остановили (cancel).
+        /// </summary>
+        public string WaitFor(Regex pattern, int timeoutMs, WaitHandle cancel)
+        {
+            using (var e = Expect(pattern))
+                return Wait(e, timeoutMs, cancel);
         }
 
         /// <summary>Строка в журнал задержек. Пишется в фоне, чтобы не тормозить макрос.</summary>
@@ -196,6 +220,9 @@ namespace MacroKit
 
         void Line(string line)
         {
+            // Сначала учёт кд: кто проснётся от строки ниже, уже увидит его
+            SkillTimers.OnLine(line);
+
             lock (_gate)
             {
                 _lines++;
